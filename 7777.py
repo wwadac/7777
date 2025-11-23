@@ -1,8 +1,8 @@
-import logging
 import requests
 from bs4 import BeautifulSoup
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes
+import logging
 
 # Настройка логирования
 logging.basicConfig(
@@ -10,107 +10,69 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Токен бота (получите у @BotFather)
+# Твой токен бота (получи у @BotFather)
 BOT_TOKEN = "8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk"
 
-# Функция для парсинга данных
-def parse_website(url):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
+    await update.message.reply_text(
+        "Привет! Я бот для отслеживания онлайна на сервере.\n"
+        "Используй /online чтобы узнать текущий онлайн"
+    )
+
+async def get_online(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Парсит и возвращает онлайн с сайта"""
     try:
+        url = "https://phoenix.easydonate.ru/"
+        
+        # Создаем заголовки чтобы избежать блокировки
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         
+        # Получаем HTML страницу[citation:7]
         response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
+        response.raise_for_status()  # Проверяем успешность запроса
         
+        # Парсим HTML[citation:2]
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Пример парсинга - измените под ваш сайт
-        data = {
-            'title': soup.title.string if soup.title else 'No title',
-            'headers': [],
-            'links': []
-        }
+        # Ищем информацию об онлайне (тебе нужно уточнить селекторы)
+        # Вот несколько возможных вариантов поиска:
         
-        # Парсим заголовки h1-h3
-        for i in range(1, 4):
-            headers = soup.find_all(f'h{i}')
-            for header in headers[:5]:  # Берем первые 5 заголовков
-                data['headers'].append(header.get_text().strip())
+        # Вариант 1: Поиск по тексту
+        online_text = None
+        for element in soup.find_all(text=True):
+            if 'онлайн' in element.lower() or 'online' in element.lower():
+                online_text = element.strip()
+                break
         
-        # Парсим ссылки
-        links = soup.find_all('a', href=True)
-        for link in links[:10]:  # Берем первые 10 ссылок
-            data['links'].append({
-                'text': link.get_text().strip()[:50],  # Обрезаем длинный текст
-                'url': link['href']
-            })
+        # Вариант 2: Поиск по классам или ID (нужно уточнить через Инспектор)
+        # online_element = soup.find('div', class_='online-class') 
+        # или
+        # online_element = soup.find('span', id='online-count')
         
-        return data
-        
+        if online_text:
+            await update.message.reply_text(f"📊 Текущий онлайн: {online_text}")
+        else:
+            # Если не нашли онлайн, покажем всю страницу для отладки
+            await update.message.reply_text(
+                "Не удалось найти информацию об онлайне.\n"
+                "Вот содержимое страницы для отладки:\n"
+                f"{soup.get_text()[:1000]}..."  # Первые 1000 символов
+            )
+            
     except Exception as e:
-        return {'error': str(e)}
+        await update.message.reply_text(f"❌ Ошибка при получении данных: {str(e)}")
 
-# Команда /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привет! Я бот для парсинга сайтов.\n"
-        "Отправь мне URL сайта, и я покажу его содержимое.\n\n"
-        "Пример: https://example.com"
-    )
-
-# Обработка текстовых сообщений с URL
-async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
-    
-    # Проверяем, что это валидный URL
-    if not url.startswith(('http://', 'https://')):
-        url = 'https://' + url
-    
-    await update.message.reply_text(f"🔄 Парсим сайт: {url}")
-    
-    # Парсим данные
-    data = parse_website(url)
-    
-    if 'error' in data:
-        await update.message.reply_text(f"❌ Ошибка: {data['error']}")
-        return
-    
-    # Формируем ответ
-    response_text = f"📄 **Результаты парсинга:**\n\n"
-    response_text += f"**Заголовок страницы:** {data['title']}\n\n"
-    
-    if data['headers']:
-        response_text += "**Основные заголовки:**\n"
-        for header in data['headers']:
-            response_text += f"• {header}\n"
-        response_text += "\n"
-    
-    if data['links']:
-        response_text += "**Ссылки:**\n"
-        for link in data['links']:
-            response_text += f"• {link['text']} - {link['url']}\n"
-    
-    # Отправляем результат (разбиваем на части если слишком длинный)
-    if len(response_text) > 4096:
-        for x in range(0, len(response_text), 4096):
-            await update.message.reply_text(response_text[x:x+4096])
-    else:
-        await update.message.reply_text(response_text)
-
-# Обработка ошибок
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logging.error(f"Ошибка: {context.error}")
-
-# Главная функция
 def main():
-    # Создаем приложение
+    """Основная функция"""
+    # Создаем приложение[citation:7]
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Добавляем обработчики
+    # Добавляем обработчики команд
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
-    application.add_error_handler(error_handler)
+    application.add_handler(CommandHandler("online", get_online))
     
     # Запускаем бота
     print("Бот запущен...")
