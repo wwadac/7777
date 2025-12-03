@@ -31,6 +31,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS user_info (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT,
+            first_name TEXT,
+            last_name TEXT,
             user_id INTEGER,
             text TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -40,11 +42,13 @@ def init_db():
     conn.close()
 
 # Сохранение данных
-def save_info(username: str, user_id: int, text: str):
+def save_info(username: str, first_name: str, last_name: str, user_id: int, text: str):
     conn = sqlite3.connect("info.db")
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO user_info (username, user_id, text) VALUES (?, ?, ?)", 
-                   (username, user_id, text))
+    cursor.execute("""
+        INSERT INTO user_info (username, first_name, last_name, user_id, text) 
+        VALUES (?, ?, ?, ?, ?)
+    """, (username, first_name, last_name, user_id, text))
     conn.commit()
     conn.close()
 
@@ -52,16 +56,24 @@ def save_info(username: str, user_id: int, text: str):
 def get_all_info():
     conn = sqlite3.connect("info.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT username, user_id, text FROM user_info ORDER BY username")
+    cursor.execute("SELECT username, first_name, last_name, user_id, text FROM user_info ORDER BY username")
     rows = cursor.fetchall()
     conn.close()
     return rows
 
 # Получение информации о конкретном пользователе
-def get_user_info(username: str):
+def get_user_info_by_username(username: str):
     conn = sqlite3.connect("info.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT username, user_id, text FROM user_info WHERE username = ?", (username,))
+    cursor.execute("SELECT username, first_name, last_name, user_id, text FROM user_info WHERE username = ?", (username,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+def get_user_info_by_id(user_id: int):
+    conn = sqlite3.connect("info.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT username, first_name, last_name, user_id, text FROM user_info WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
     return row
@@ -76,60 +88,6 @@ def delete_user_info(username: str):
     conn.close()
     return deleted_count
 
-# Получение базы данных как файл
-def get_db_file():
-    with open("info.db", "rb") as f:
-        return BytesIO(f.read())
-
-# Экспорт данных в JSON
-def export_to_json():
-    conn = sqlite3.connect("info.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM user_info")
-    rows = cursor.fetchall()
-    
-    # Получаем названия колонок
-    cursor.execute("PRAGMA table_info(user_info)")
-    columns = [column[1] for column in cursor.fetchall()]
-    
-    # Конвертируем в список словарей
-    data = []
-    for row in rows:
-        data.append(dict(zip(columns, row)))
-    
-    conn.close()
-    
-    # Создаем JSON строку
-    json_str = json.dumps(data, ensure_ascii=False, indent=2, default=str)
-    return StringIO(json_str)
-
-# Экспорт данных в CSV
-def export_to_csv():
-    conn = sqlite3.connect("info.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM user_info")
-    rows = cursor.fetchall()
-    
-    # Получаем названия колонок
-    cursor.execute("PRAGMA table_info(user_info)")
-    columns = [column[1] for column in cursor.fetchall()]
-    
-    conn.close()
-    
-    # Создаем CSV в памяти
-    output = StringIO()
-    writer = csv.writer(output)
-    
-    # Записываем заголовки
-    writer.writerow(columns)
-    
-    # Записываем данные
-    for row in rows:
-        writer.writerow(row)
-    
-    output.seek(0)
-    return StringIO(output.getvalue())
-
 # Проверка админских прав
 async def is_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
     admins = await context.bot.get_chat_administrators(chat_id)
@@ -140,142 +98,43 @@ async def is_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: in
 def is_global_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
 
-# Обработчик команды /tops
-async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Обработчик команды .список
+async def spisok(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = get_all_info()
     if not rows:
         await update.message.reply_text("📭 Список пуст.")
         return
 
     response = "📋 Список информации:\n\n"
-    for username, user_id, text in rows:
+    for username, first_name, last_name, user_id, text in rows:
+        # Формируем отображаемое имя
+        if username:
+            display_name = f"@{username}"
+        elif first_name and last_name:
+            display_name = f"{first_name} {last_name}"
+        elif first_name:
+            display_name = first_name
+        else:
+            display_name = f"id{user_id}"
+        
+        # Формируем ссылку если есть user_id
+        if user_id and user_id != 0:
+            # Создаем Markdown ссылку на аккаунт
+            user_link = f"[{display_name}](tg://user?id={user_id})"
+        else:
+            user_link = display_name
+        
         # Заменяем 0 на ↔ в user_id при отображении
         user_id_display = "↔" if user_id == 0 else user_id
-        username_display = f"@{username}" if username else f"id{user_id}"
-        response += f"{username_display} | {user_id_display} | {text}\n"
+        
+        response += f"{user_link} | {user_id_display} | {text}\n"
 
     # Если сообщение слишком длинное, разбиваем на части
     if len(response) > 4096:
         for i in range(0, len(response), 4096):
-            await update.message.reply_text(response[i:i+4096])
+            await update.message.reply_text(response[i:i+4096], parse_mode="Markdown", disable_web_page_preview=True)
     else:
-        await update.message.reply_text(response)
-
-# Обработчик команды /export
-async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    # Проверяем права глобального админа
-    if not is_global_admin(user_id):
-        await update.message.reply_text("❌ Эта команда только для глобального администратора!")
-        return
-    
-    if not context.args:
-        await update.message.reply_text(
-            "📤 Используйте:\n"
-            "`/export json` - экспорт в JSON\n"
-            "`/export csv` - экспорт в CSV\n"
-            "`/export db` - скачать базу данных",
-            parse_mode="Markdown"
-        )
-        return
-    
-    export_type = context.args[0].lower()
-    
-    try:
-        if export_type == "json":
-            json_file = export_to_json()
-            await update.message.reply_document(
-                document=BytesIO(json_file.getvalue().encode('utf-8')),
-                filename="user_info.json",
-                caption="📄 Экспорт данных в JSON"
-            )
-            
-        elif export_type == "csv":
-            csv_file = export_to_csv()
-            await update.message.reply_document(
-                document=BytesIO(csv_file.getvalue().encode('utf-8')),
-                filename="user_info.csv",
-                caption="📊 Экспорт данных в CSV"
-            )
-            
-        elif export_type == "db":
-            db_file = get_db_file()
-            await update.message.reply_document(
-                document=db_file,
-                filename="info.db",
-                caption="💾 Полная база данных SQLite"
-            )
-            
-        else:
-            await update.message.reply_text("❌ Неверный формат. Используйте: json, csv или db")
-            
-    except Exception as e:
-        logging.error(f"Ошибка при экспорте: {e}")
-        await update.message.reply_text(f"❌ Ошибка при экспорте: {str(e)}")
-
-# Обработчик команды /stats
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    # Проверяем права глобального админа
-    if not is_global_admin(user_id):
-        await update.message.reply_text("❌ Эта команда только для глобального администратора!")
-        return
-    
-    conn = sqlite3.connect("info.db")
-    cursor = conn.cursor()
-    
-    # Получаем статистику
-    cursor.execute("SELECT COUNT(*) FROM user_info")
-    total_records = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(DISTINCT username) FROM user_info")
-    unique_users = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM user_info WHERE user_id = 0")
-    unknown_id = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM user_info WHERE user_id != 0")
-    known_id = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT created_at FROM user_info ORDER BY id DESC LIMIT 1")
-    last_record = cursor.fetchone()
-    last_update = last_record[0] if last_record else "нет данных"
-    
-    conn.close()
-    
-    stats_text = (
-        "📊 Статистика базы данных:\n\n"
-        f"📝 Всего записей: {total_records}\n"
-        f"👤 Уникальных пользователей: {unique_users}\n"
-        f"🔍 С известным ID: {known_id}\n"
-        f"❓ С неизвестным ID: {unknown_id}\n"
-        f"🕐 Последнее обновление: {last_update}\n\n"
-        f"🆔 Ваш ID: {user_id}"
-    )
-    
-    await update.message.reply_text(stats_text)
-
-# Обработчик команды /backup
-async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    # Проверяем права глобального админа
-    if not is_global_admin(user_id):
-        await update.message.reply_text("❌ Эта команда только для глобального администратора!")
-        return
-    
-    try:
-        db_file = get_db_file()
-        await update.message.reply_document(
-            document=db_file,
-            filename=f"backup_info_{update.message.date.strftime('%Y%m%d_%H%M%S')}.db",
-            caption="💾 Автоматический бэкап базы данных"
-        )
-    except Exception as e:
-        logging.error(f"Ошибка при создании бэкапа: {e}")
-        await update.message.reply_text(f"❌ Ошибка при создании бэкапа: {str(e)}")
+        await update.message.reply_text(response, parse_mode="Markdown", disable_web_page_preview=True)
 
 # Обработчик +инфо
 async def add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -292,32 +151,60 @@ async def add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Парсинг: +инфо @username текст
-    match = re.match(r"^\+\s*инфо\s+@?(\w+)\s+(.+)$", message, re.DOTALL)
+    match = re.match(r"^\+\s*инфо\s+(@?\w+)\s+(.+)$", message, re.DOTALL)
     if not match:
         await update.message.reply_text("📝 Используйте формат: `+инфо @username текст`", parse_mode="Markdown")
         return
 
-    target_username = match.group(1).lower()
+    target = match.group(1).lower()  # Может быть @username или просто текст
     info_text = match.group(2).strip()
+    
+    # Убираем @ если есть
+    if target.startswith('@'):
+        target = target[1:]
+    
+    target_user_id = 0
+    first_name = ""
+    last_name = ""
+    actual_username = target
+
+    # Пытаемся найти пользователя
+    try:
+        # Сначала пытаемся как username
+        try:
+            chat_member = await context.bot.get_chat_member(chat_id, f"@{target}")
+            target_user_id = chat_member.user.id
+            actual_username = chat_member.user.username or target
+            first_name = chat_member.user.first_name or ""
+            last_name = chat_member.user.last_name or ""
+        except:
+            # Пробуем поискать по ID (если target - число)
+            if target.isdigit():
+                chat_member = await context.bot.get_chat_member(chat_id, int(target))
+                target_user_id = chat_member.user.id
+                actual_username = chat_member.user.username or f"id{target}"
+                first_name = chat_member.user.first_name or ""
+                last_name = chat_member.user.last_name or ""
+            else:
+                # Ищем в списке участников чата по имени
+                # Это сложно, Telegram API не дает прямой поиск
+                # Будем сохранять как есть
+                pass
+    except Exception as e:
+        logging.warning(f"Не удалось получить информацию для {target}: {e}")
+        # Сохраняем как есть
 
     # Проверяем, есть ли уже информация о пользователе
-    existing_info = get_user_info(target_username)
+    existing_info = get_user_info_by_username(actual_username)
+    if not existing_info and target_user_id != 0:
+        existing_info = get_user_info_by_id(target_user_id)
+    
     if existing_info:
-        await update.message.reply_text(f"ℹ️ Информация о @{target_username} уже есть. Используйте `-инфо @{target_username}` чтобы удалить.")
+        await update.message.reply_text(f"ℹ️ Информация о @{actual_username} уже есть. Используйте `-инфо @{actual_username}` чтобы удалить.")
         return
 
-    # Пытаемся получить user_id
-    target_user_id = 0
-    try:
-        chat_member = await context.bot.get_chat_member(chat_id, f"@{target_username}")
-        target_user_id = chat_member.user.id
-        actual_username = chat_member.user.username or target_username
-    except Exception as e:
-        actual_username = target_username
-        logging.warning(f"Не удалось получить ID для @{target_username}: {e}")
-
     # Сохраняем
-    save_info(actual_username, target_user_id, info_text)
+    save_info(actual_username, first_name, last_name, target_user_id, info_text)
     await update.message.reply_text(f"✅ Информация для @{actual_username} сохранена: {info_text}")
 
 # Обработчик -инфо
@@ -343,7 +230,7 @@ async def remove_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_username = match.group(1).lower()
 
     # Проверяем, есть ли информация о пользователе
-    existing_info = get_user_info(target_username)
+    existing_info = get_user_info_by_username(target_username)
     if not existing_info:
         await update.message.reply_text(f"ℹ️ Информации о @{target_username} не найдено.")
         return
@@ -371,19 +258,35 @@ async def get_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_username = match.group(1).lower()
 
     # Получаем информацию о пользователе
-    user_info = get_user_info(target_username)
+    user_info = get_user_info_by_username(target_username)
     
     if not user_info:
         await update.message.reply_text(f"❌ Информации о @{target_username} не найдено.")
         return
 
-    username, user_id, text = user_info
-    username_display = f"@{username}" if username else f"id{user_id}"
+    username, first_name, last_name, user_id, text = user_info
+    
+    # Формируем отображаемое имя
+    if username:
+        display_name = f"@{username}"
+    elif first_name and last_name:
+        display_name = f"{first_name} {last_name}"
+    elif first_name:
+        display_name = first_name
+    else:
+        display_name = f"id{user_id}"
+    
+    # Формируем ссылку если есть user_id
+    if user_id and user_id != 0:
+        user_link = f"[{display_name}](tg://user?id={user_id})"
+    else:
+        user_link = display_name
     
     # Заменяем 0 на ↔ в user_id при отображении
     user_id_display = "↔" if user_id == 0 else user_id
-    response = f"👤 {username_display} | {user_id_display} | {text}"
-    await update.message.reply_text(response)
+    
+    response = f"👤 {user_link} | {user_id_display} | {text}"
+    await update.message.reply_text(response, parse_mode="Markdown", disable_web_page_preview=True)
 
 # Основной обработчик сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -408,19 +311,17 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Регистрируем обработчики команд
-    app.add_handler(CommandHandler("tops", tops))
-    app.add_handler(CommandHandler("export", export_data))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("backup", backup))
+    app.add_handler(CommandHandler("список", spisok))
+    app.add_handler(CommandHandler("tops", spisok))  # Обратная совместимость
     
     # Регистрируем обработчик сообщений
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("Бот запущен...")
-    print(f"ID администратора: {ADMIN_ID}")
-    print("Команды администратора:")
-    print("/export <json|csv|db> - скачать данные")
-    print("/stats - статистика базы")
-    print("/backup - бэкап базы данных")
+    print("Основные команды:")
+    print("+инфо @ник текст - добавить информацию")
+    print("-инфо @ник - удалить информацию")
+    print("!инфо @ник - узнать информацию")
+    print(".список - весь список (кликабельные ссылки)")
     
     app.run_polling()
