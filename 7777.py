@@ -94,12 +94,8 @@ async def is_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: in
     admin_ids = [admin.user.id for admin in admins]
     return user_id in admin_ids
 
-# Проверка прав глобального админа
-def is_global_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
-
-# Обработчик команды .список
-async def spisok(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Обработчик команды /tops
+async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = get_all_info()
     if not rows:
         await update.message.reply_text("📭 Список пуст.")
@@ -185,11 +181,6 @@ async def add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 actual_username = chat_member.user.username or f"id{target}"
                 first_name = chat_member.user.first_name or ""
                 last_name = chat_member.user.last_name or ""
-            else:
-                # Ищем в списке участников чата по имени
-                # Это сложно, Telegram API не дает прямой поиск
-                # Будем сохранять как есть
-                pass
     except Exception as e:
         logging.warning(f"Не удалось получить информацию для {target}: {e}")
         # Сохраняем как есть
@@ -311,8 +302,7 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Регистрируем обработчики команд
-    app.add_handler(CommandHandler("список", spisok))
-    app.add_handler(CommandHandler("tops", spisok))  # Обратная совместимость
+    app.add_handler(CommandHandler("tops", tops))
     
     # Регистрируем обработчик сообщений
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -322,6 +312,6 @@ if __name__ == "__main__":
     print("+инфо @ник текст - добавить информацию")
     print("-инфо @ник - удалить информацию")
     print("!инфо @ник - узнать информацию")
-    print(".список - весь список (кликабельные ссылки)")
+    print("/tops - весь список (с кликабельными ссылками)")
     
     app.run_polling()
