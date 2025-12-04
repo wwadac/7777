@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 
 # Токен бота (замените на свой)
 BOT_TOKEN = "8534057742:AAFfm2gswdz-b6STcrWcCdRfaToRDkPUu0A"
-# ID администратора (замените на свой Telegram ID)
-ADMIN_ID = [6893832048, 8000395560] # Ваш Telegram ID
+# ID администраторов (список Telegram ID)
+ADMIN_IDS = [6893832048, 8000395560]  # Ваши Telegram ID
 
 # Инициализация базы данных
 def init_db():
@@ -92,7 +92,7 @@ def delete_user_info(username: str):
     conn.close()
     return deleted_count
 
-# Проверка админских прав
+# Проверка админских прав в группе
 async def is_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
     try:
         admins = await context.bot.get_chat_administrators(chat_id)
@@ -100,12 +100,12 @@ async def is_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: in
         return user_id in admin_ids
     except Exception as e:
         logger.error(f"Ошибка при проверке прав администратора: {e}")
-        # Если не удалось получить список админов, разрешаем доступ только владельцу бота
-        return user_id == ADMIN_ID
+        # Если не удалось получить список админов, разрешаем доступ только владельцам бота
+        return user_id in ADMIN_IDS
 
-# Проверка что пользователь - владелец бота (ADMIN_ID)
+# Проверка что пользователь - владелец бота (в списке ADMIN_IDS)
 def is_bot_owner(user_id: int) -> bool:
-    return user_id == ADMIN_ID
+    return user_id in ADMIN_IDS
 
 # Обработчик команды /export_db
 async def export_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -192,8 +192,9 @@ async def import_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Создаем резервную копию текущей базы данных
         if os.path.exists("info.db"):
-            os.rename("info.db", "info.db.backup")
-            logger.info("Создана резервная копия базы данных")
+            backup_name = f"info.db.backup_{int(time.time())}"
+            os.rename("info.db", backup_name)
+            logger.info(f"Создана резервная копия базы данных: {backup_name}")
         
         # Сохраняем новую базу данных
         await file.download_to_drive("info.db")
@@ -217,9 +218,9 @@ async def import_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         except sqlite3.Error as e:
             # Восстанавливаем резервную копию при ошибке
-            if os.path.exists("info.db.backup"):
+            if os.path.exists(backup_name):
                 os.remove("info.db")
-                os.rename("info.db.backup", "info.db")
+                os.rename(backup_name, "info.db")
             
             await update.message.reply_text(f"❌ Ошибка в импортированной базе данных: {e}")
             logger.error(f"Ошибка при импорте базы данных: {e}")
@@ -257,6 +258,17 @@ async def help_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     
     await update.message.reply_text(help_text, parse_mode="Markdown")
+
+# Обработчик команды /admins
+async def show_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not is_bot_owner(user_id):
+        await update.message.reply_text("❌ Эта команда доступна только владельцу бота!")
+        return
+    
+    admins_list = "\n".join([f"• {admin_id}" for admin_id in ADMIN_IDS])
+    await update.message.reply_text(f"👑 Владельцы бота:\n{admins_list}")
 
 # Обработчик команды /tops
 async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -501,6 +513,8 @@ async def debug_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Запуск
 if __name__ == "__main__":
+    import time
+    
     # Инициализация базы данных
     init_db()
     
@@ -512,6 +526,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("export_logs", export_logs))
     app.add_handler(CommandHandler("import_db", import_db))
     app.add_handler(CommandHandler("help_admin", help_admin))
+    app.add_handler(CommandHandler("admins", show_admins))
     
     # Регистрируем обработчики команд для всех пользователей
     app.add_handler(CommandHandler("tops", tops))
@@ -525,11 +540,13 @@ if __name__ == "__main__":
     print("=" * 50)
     print("🤖 Бот запущен...")
     print("=" * 50)
-    print("\n🎃 Команды для владельца бота (ADMIN_ID):")
+    print(f"\n👑 Владельцы бота: {ADMIN_IDS}")
+    print("\n👑 Команды для владельцев бота:")
     print("/export_db - Экспортировать базу данных")
     print("/export_logs - Экспортировать логи бота")
     print("/import_db - Импортировать базу данных (отправьте файл info.db)")
     print("/help_admin - Справка по командам администратора")
+    print("/admins - Показать список владельцев бота")
     print("\n👥 Команды для админов группы:")
     print("/tops - Показать весь список информации")
     print("+инфо @ник текст - добавить информацию")
@@ -539,5 +556,3 @@ if __name__ == "__main__":
     print("=" * 50)
     
     app.run_polling()
-
-
