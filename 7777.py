@@ -2,30 +2,82 @@ import logging
 import sqlite3
 import re
 import json
-import csv
 import os
-from io import BytesIO, StringIO
-from telegram import Update
+import time
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
     MessageHandler,
     CommandHandler,
     filters,
+    CallbackQueryHandler,
+    ConversationHandler
 )
 
 # Настройка логирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
     level=logging.INFO,
-    filename='bot.log'  # Добавляем запись логов в файл
+    filename='bot.log'
 )
 logger = logging.getLogger(__name__)
 
-# Токен бота (замените на свой)
+# Константы
 BOT_TOKEN = "8534057742:AAFfm2gswdz-b6STcrWcCdRfaToRDkPUu0A"
-# ID администраторов (список Telegram ID)
-ADMIN_IDS = [6893832048, 8000395560]  # Ваши Telegram ID
+MAIN_OWNER_ID = 6893832048  # Главный владелец (только он может добавлять админов)
+ADMINS_FILE = "admins.json"
+
+# Состояния для ConversationHandler
+ADD_ADMIN, CONFIRM_ADD_ADMIN = range(2)
+
+# Загрузка администраторов из файла
+def load_admins():
+    if os.path.exists(ADMINS_FILE):
+        try:
+            with open(ADMINS_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    # Если файла нет или ошибка, создаем с главным владельцем
+    admins = [MAIN_OWNER_ID]
+    save_admins(admins)
+    return admins
+
+# Сохранение администраторов в файл
+def save_admins(admins):
+    with open(ADMINS_FILE, 'w') as f:
+        json.dump(admins, f)
+
+# Получение списка администраторов
+def get_admins():
+    return load_admins()
+
+# Проверка является ли пользователь администратором бота
+def is_bot_admin(user_id: int) -> bool:
+    return user_id in get_admins()
+
+# Проверка является ли пользователь главным владельцем
+def is_main_owner(user_id: int) -> bool:
+    return user_id == MAIN_OWNER_ID
+
+# Добавление нового администратора
+def add_admin(new_admin_id: int) -> bool:
+    admins = get_admins()
+    if new_admin_id not in admins:
+        admins.append(new_admin_id)
+        save_admins(admins)
+        return True
+    return False
+
+# Удаление администратора
+def remove_admin(admin_id: int) -> bool:
+    admins = get_admins()
+    if admin_id in admins and admin_id != MAIN_OWNER_ID:
+        admins.remove(admin_id)
+        save_admins(admins)
+        return True
+    return False
 
 # Инициализация базы данных
 def init_db():
@@ -65,7 +117,7 @@ def get_all_info():
     conn.close()
     return rows
 
-# Получение информации о конкретном пользователе
+# Получение информации о пользователе
 def get_user_info_by_username(username: str):
     conn = sqlite3.connect("info.db")
     cursor = conn.cursor()
@@ -100,177 +152,333 @@ async def is_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: in
         return user_id in admin_ids
     except Exception as e:
         logger.error(f"Ошибка при проверке прав администратора: {e}")
-        # Если не удалось получить список админов, разрешаем доступ только владельцам бота
-        return user_id in ADMIN_IDS
+        return is_bot_admin(user_id)
 
-# Проверка что пользователь - владелец бота (в списке ADMIN_IDS)
-def is_bot_owner(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
+# ========== КОМАНДЫ ДЛЯ ВЛАДЕЛЬЦЕВ БОТА ==========
 
-# Обработчик команды /export_db
-async def export_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Команда /admin_panel - панель администратора
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not is_bot_admin(user_id):
+        await update.message.reply_text("❌ Эта команда доступна только владельцам бота!")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("📦 Экспорт БД", callback_data="export_db")],
+        [InlineKeyboardButton("📋 Экспорт логов", callback_data="export_logs")],
+        [InlineKeyboardButton("🔄 Импорт БД", callback_data="import_db_info")],
+        [InlineKeyboardButton("👥 Список админов", callback_data="list_admins")],
+    ]
+    
+    if is_main_owner(user_id):
+        keyboard.append([InlineKeyboardButton("➕ Добавить админа", callback_data="add_admin_start")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "🛠️ **Панель администратора**\n\n"
+        "Выберите действие:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+# Обработчик кнопок панели администратора
+async def admin_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    
+    if not is_bot_admin(user_id):
+        await query.edit_message_text("❌ Доступ запрещен!")
+        return
+    
+    if query.data == "export_db":
+        await export_db_command(query, context)
+    elif query.data == "export_logs":
+        await export_logs_command(query, context)
+    elif query.data == "import_db_info":
+        await import_db_info(query, context)
+    elif query.data == "list_admins":
+        await list_admins_command(query, context)
+    elif query.data == "add_admin_start":
+        if is_main_owner(user_id):
+            await add_admin_start(query, context)
+        else:
+            await query.edit_message_text("❌ Только главный владелец может добавлять админов!")
+
+# Экспорт базы данных
+async def export_db_command(query, context):
+    if not os.path.exists("info.db"):
+        await query.edit_message_text("❌ База данных не найдена!")
+        return
+    
     try:
-        user_id = update.effective_user.id
-        
-        # Проверяем, что команду вызвал владелец бота
-        if not is_bot_owner(user_id):
-            await update.message.reply_text("❌ Эта команда доступна только владельцу бота!")
-            return
-            
-        # Проверяем существование базы данных
-        if not os.path.exists("info.db"):
-            await update.message.reply_text("❌ База данных не найдена!")
-            return
-            
-        # Отправляем файл базы данных
         with open("info.db", "rb") as db_file:
-            await update.message.reply_document(
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
                 document=db_file,
                 filename="info.db",
                 caption="📦 База данных бота"
             )
-        logger.info(f"База данных экспортирована пользователем {user_id}")
-        
+        await query.edit_message_text("✅ База данных отправлена!")
     except Exception as e:
-        logger.error(f"Ошибка при экспорте базы данных: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при экспорте базы данных!")
+        logger.error(f"Ошибка при экспорте БД: {e}")
+        await query.edit_message_text("❌ Ошибка при отправке базы данных!")
 
-# Обработчик команды /export_logs
-async def export_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Экспорт логов
+async def export_logs_command(query, context):
+    if not os.path.exists("bot.log"):
+        await query.edit_message_text("❌ Файл логов не найден!")
+        return
+    
     try:
-        user_id = update.effective_user.id
-        
-        # Проверяем, что команду вызвал владелец бота
-        if not is_bot_owner(user_id):
-            await update.message.reply_text("❌ Эта команда доступна только владельцу бота!")
-            return
-            
-        # Проверяем существование файла логов
-        if not os.path.exists("bot.log"):
-            await update.message.reply_text("❌ Файл логов не найден!")
-            return
-            
-        # Отправляем файл логов
         with open("bot.log", "rb") as log_file:
-            await update.message.reply_document(
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
                 document=log_file,
                 filename="bot.log",
                 caption="📋 Логи бота"
             )
-        logger.info(f"Логи экспортированы пользователем {user_id}")
-        
+        await query.edit_message_text("✅ Логи отправлены!")
     except Exception as e:
         logger.error(f"Ошибка при экспорте логов: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при экспорте логов!")
+        await query.edit_message_text("❌ Ошибка при отправке логов!")
 
-# Обработчик команды /import_db
-async def import_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Информация об импорте БД
+async def import_db_info(query, context):
+    await query.edit_message_text(
+        "🔄 **Импорт базы данных**\n\n"
+        "Для импорта базы данных:\n"
+        "1. Отправьте файл `info.db` в этот чат\n"
+        "2. Бот автоматически его обработает\n"
+        "3. После успешного импорта бот перезагрузится\n\n"
+        "⚠️ **Внимание:** Текущая база данных будет заменена!",
+        parse_mode="Markdown"
+    )
+
+# Список админов
+async def list_admins_command(query, context):
+    admins = get_admins()
+    
+    admin_list = "👑 **Владельцы бота:**\n\n"
+    for admin_id in admins:
+        try:
+            user = await context.bot.get_chat(admin_id)
+            name = f"@{user.username}" if user.username else f"{user.first_name or 'User'}"
+            admin_list += f"• {name} (ID: `{admin_id}`)\n"
+        except:
+            admin_list += f"• ID: `{admin_id}`\n"
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_admin")]]
+    
+    await query.edit_message_text(
+        admin_list,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+# Добавление админа - начало
+async def add_admin_start(query, context):
+    await query.edit_message_text(
+        "➕ **Добавление администратора**\n\n"
+        "Отправьте ID пользователя, которого хотите добавить.\n"
+        "Для отмены отправьте /cancel",
+        parse_mode="Markdown"
+    )
+    return ADD_ADMIN
+
+# Добавление админа - обработка ID
+async def add_admin_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not is_main_owner(user_id):
+        await update.message.reply_text("❌ Только главный владелец может добавлять админов!")
+        return ConversationHandler.END
+    
     try:
-        user_id = update.effective_user.id
+        new_admin_id = int(update.message.text)
         
-        # Проверяем, что команду вызвал владелец бота
-        if not is_bot_owner(user_id):
-            await update.message.reply_text("❌ Эта команда доступна только владельцу бота!")
-            return
+        if new_admin_id == MAIN_OWNER_ID:
+            await update.message.reply_text("❌ Этот пользователь уже является главным владельцем!")
+            return ConversationHandler.END
         
-        # Проверяем, что сообщение содержит документ
-        if not update.message.document:
-            await update.message.reply_text(
-                "📁 Для импорта базы данных отправьте файл info.db в ответ на это сообщение\n\n"
-                "⚠️ **Внимание:** Существующая база данных будет перезаписана!"
-            )
-            return
+        if new_admin_id in get_admins():
+            await update.message.reply_text("❌ Этот пользователь уже является администратором!")
+            return ConversationHandler.END
         
-        # Проверяем имя файла
-        document = update.message.document
-        if document.file_name != "info.db":
-            await update.message.reply_text("❌ Неверный файл. Ожидается файл с именем 'info.db'")
-            return
+        # Сохраняем во временные данные
+        context.user_data['new_admin_id'] = new_admin_id
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Да", callback_data="confirm_add"),
+                InlineKeyboardButton("❌ Нет", callback_data="cancel_add")
+            ]
+        ]
+        
+        await update.message.reply_text(
+            f"❓ Добавить пользователя с ID `{new_admin_id}` в администраторы?",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        
+        return CONFIRM_ADD_ADMIN
+        
+    except ValueError:
+        await update.message.reply_text("❌ Неверный формат ID. Отправьте числовой ID.")
+        return ADD_ADMIN
+
+# Подтверждение добавления админа
+async def confirm_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "confirm_add":
+        new_admin_id = context.user_data.get('new_admin_id')
+        
+        if add_admin(new_admin_id):
+            await query.edit_message_text(f"✅ Пользователь с ID `{new_admin_id}` добавлен в администраторы!")
+        else:
+            await query.edit_message_text("❌ Ошибка при добавлении администратора!")
+    else:
+        await query.edit_message_text("❌ Добавление администратора отменено!")
+    
+    return ConversationHandler.END
+
+# Отмена добавления админа
+async def cancel_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Добавление администратора отменено!")
+    return ConversationHandler.END
+
+# Кнопка "Назад" в панели админа
+async def back_to_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    
+    if not is_bot_admin(user_id):
+        await query.edit_message_text("❌ Доступ запрещен!")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("📦 Экспорт БД", callback_data="export_db")],
+        [InlineKeyboardButton("📋 Экспорт логов", callback_data="export_logs")],
+        [InlineKeyboardButton("🔄 Импорт БД", callback_data="import_db_info")],
+        [InlineKeyboardButton("👥 Список админов", callback_data="list_admins")],
+    ]
+    
+    if is_main_owner(user_id):
+        keyboard.append([InlineKeyboardButton("➕ Добавить админа", callback_data="add_admin_start")])
+    
+    await query.edit_message_text(
+        "🛠️ **Панель администратора**\n\n"
+        "Выберите действие:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+# ========== ОБРАБОТКА ФАЙЛОВ ДЛЯ ИМПОРТА БД ==========
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.document:
+        return
+    
+    user_id = update.effective_user.id
+    
+    # Проверяем, что отправитель - администратор бота
+    if not is_bot_admin(user_id):
+        return
+    
+    document = update.message.document
+    
+    # Проверяем, что это файл базы данных
+    if document.file_name == "info.db":
+        await process_db_import(update, context, document)
+    else:
+        # Если это не info.db, но администратор отправил другой файл
+        # Можем показать подсказку
+        await update.message.reply_text(
+            "📁 Для импорта базы данных отправьте файл с именем `info.db`",
+            parse_mode="Markdown"
+        )
+
+async def process_db_import(update: Update, context: ContextTypes.DEFAULT_TYPE, document):
+    user_id = update.effective_user.id
+    chat_id = update.message.chat_id
+    
+    try:
+        # Создаем папку для временных файлов
+        os.makedirs("temp", exist_ok=True)
+        
+        # Уведомляем о начале загрузки
+        status_msg = await update.message.reply_text("⬇️ Загрузка файла базы данных...")
         
         # Скачиваем файл
         file = await context.bot.get_file(document.file_id)
+        temp_path = f"temp/info_{int(time.time())}.db"
+        await file.download_to_drive(temp_path)
         
-        # Создаем резервную копию текущей базы данных
-        if os.path.exists("info.db"):
-            backup_name = f"info.db.backup_{int(time.time())}"
-            os.rename("info.db", backup_name)
-            logger.info(f"Создана резервная копия базы данных: {backup_name}")
-        
-        # Сохраняем новую базу данных
-        await file.download_to_drive("info.db")
+        await status_msg.edit_text("🔍 Проверка файла базы данных...")
         
         # Проверяем валидность базы данных
         try:
-            conn = sqlite3.connect("info.db")
+            conn = sqlite3.connect(temp_path)
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM user_info")
             count = cursor.fetchone()[0]
+            cursor.execute("PRAGMA table_info(user_info)")
+            columns = cursor.fetchall()
             conn.close()
             
-            await update.message.reply_text(
+            # Проверяем структуру таблицы
+            expected_columns = ['id', 'username', 'first_name', 'last_name', 'user_id', 'text', 'created_at']
+            actual_columns = [col[1] for col in columns]
+            
+            if not all(col in actual_columns for col in expected_columns[:6]):
+                await status_msg.edit_text("❌ Неверная структура базы данных!")
+                os.remove(temp_path)
+                return
+            
+            await status_msg.edit_text(f"✅ Файл проверен. Записей: {count}\n\nСоздаю резервную копию...")
+            
+            # Создаем резервную копию текущей БД
+            if os.path.exists("info.db"):
+                backup_name = f"info.db.backup_{int(time.time())}"
+                os.rename("info.db", backup_name)
+            
+            # Заменяем текущую БД
+            os.rename(temp_path, "info.db")
+            
+            # Очищаем временную папку
+            for file in os.listdir("temp"):
+                os.remove(f"temp/{file}")
+            os.rmdir("temp")
+            
+            await status_msg.edit_text(
                 f"✅ База данных успешно импортирована!\n"
                 f"📊 Записей в базе: {count}\n\n"
-                f"🔄 Бот будет перезагружен для применения изменений..."
+                f"🔄 Бот будет перезагружен через 3 секунды..."
             )
             
-            # Перезапускаем бота
+            # Ждем 3 секунды и перезагружаемся
+            await asyncio.sleep(3)
             os._exit(0)
             
         except sqlite3.Error as e:
-            # Восстанавливаем резервную копию при ошибке
-            if os.path.exists(backup_name):
-                os.remove("info.db")
-                os.rename(backup_name, "info.db")
-            
-            await update.message.reply_text(f"❌ Ошибка в импортированной базе данных: {e}")
-            logger.error(f"Ошибка при импорте базы данных: {e}")
+            await status_msg.edit_text(f"❌ Ошибка в базе данных: {str(e)}")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
             
     except Exception as e:
-        logger.error(f"Ошибка при импорте базы данных: {e}")
+        logger.error(f"Ошибка при импорте БД: {e}")
         await update.message.reply_text("❌ Произошла ошибка при импорте базы данных!")
 
-# Обработчик команды /help_admin
-async def help_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if not is_bot_owner(user_id):
-        await update.message.reply_text("❌ Эта команда доступна только владельцу бота!")
-        return
-    
-    help_text = """
-🛠️ **Команды для администратора бота:**
+# ========== ОСНОВНЫЕ КОМАНДЫ БОТА ==========
 
-/export_db - Экспортировать базу данных
-/export_logs - Экспортировать логи бота
-/import_db - Импортировать базу данных (отправьте файл info.db в ответ)
-/help_admin - Показать это сообщение
-
-📝 **Команды для админов группы:**
-/tops - Показать весь список информации
-+инфо @username текст - Добавить информацию
--инфо @username - Удалить информацию
-!инфо @username - Узнать информацию
-
-⚠️ **Важно:**
-- При импорте базы данных старая будет заменена
-- Рекомендуется сделать экспорт перед импортом
-- Бот перезагружается после импорта базы данных
-    """
-    
-    await update.message.reply_text(help_text, parse_mode="Markdown")
-
-# Обработчик команды /admins
-async def show_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if not is_bot_owner(user_id):
-        await update.message.reply_text("❌ Эта команда доступна только владельцу бота!")
-        return
-    
-    admins_list = "\n".join([f"• {admin_id}" for admin_id in ADMIN_IDS])
-    await update.message.reply_text(f"👑 Владельцы бота:\n{admins_list}")
-
-# Обработчик команды /tops
+# Команда /tops
 async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         logger.info(f"Получена команда /tops от пользователя {update.effective_user.id}")
@@ -280,7 +488,7 @@ async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Эта команда доступна только в группах!")
             return
             
-        # Проверяем админские права (опционально, можно убрать если нужно всем)
+        # Проверяем админские права
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
         
@@ -295,7 +503,6 @@ async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         response = "📋 Список информации:\n\n"
         for username, first_name, last_name, user_id, text in rows:
-            # Формируем отображаемое имя
             if username:
                 display_name = f"@{username}"
             elif first_name and last_name:
@@ -305,19 +512,15 @@ async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 display_name = f"id{user_id}"
             
-            # Формируем ссылку если есть user_id
             if user_id and user_id != 0:
-                # Создаем Markdown ссылку на аккаунт
                 user_link = f"[{display_name}](tg://user?id={user_id})"
             else:
                 user_link = display_name
             
-            # Заменяем 0 на ↔ в user_id при отображении
             user_id_display = "↔" if user_id == 0 else user_id
             
             response += f"{user_link} | {user_id_display} | {text}\n"
 
-        # Если сообщение слишком длинное, разбиваем на части
         if len(response) > 4096:
             parts = []
             current_part = ""
@@ -335,7 +538,6 @@ async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if i == 0:
                     await update.message.reply_text(part, parse_mode="Markdown", disable_web_page_preview=True)
                 else:
-                    # Для последующих сообщений добавляем заголовок
                     await update.message.reply_text(f"📋 Продолжение ({i+1}/{len(parts)}):\n\n{part}", 
                                                   parse_mode="Markdown", 
                                                   disable_web_page_preview=True)
@@ -344,7 +546,7 @@ async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     except Exception as e:
         logger.error(f"Ошибка в команде /tops: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при выполнении команды. Проверьте логи бота.")
+        await update.message.reply_text("❌ Произошла ошибка при выполнении команды.")
 
 # Обработчик +инфо
 async def add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -355,21 +557,18 @@ async def add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
 
-    # Проверяем админские права
     if not await is_admin(context, chat_id, user_id):
         await update.message.reply_text("❌ Только админы могут использовать эту команду!")
         return
 
-    # Парсинг: +инфо @username текст
     match = re.match(r"^\+\s*инфо\s+(@?\w+)\s+(.+)$", message, re.DOTALL)
     if not match:
         await update.message.reply_text("📝 Используйте формат: `+инфо @username текст`", parse_mode="Markdown")
         return
 
-    target = match.group(1).lower()  # Может быть @username или просто текст
+    target = match.group(1).lower()
     info_text = match.group(2).strip()
     
-    # Убираем @ если есть
     if target.startswith('@'):
         target = target[1:]
     
@@ -378,9 +577,7 @@ async def add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_name = ""
     actual_username = target
 
-    # Пытаемся найти пользователя
     try:
-        # Сначала пытаемся как username
         try:
             chat_member = await context.bot.get_chat_member(chat_id, f"@{target}")
             target_user_id = chat_member.user.id
@@ -388,7 +585,6 @@ async def add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
             first_name = chat_member.user.first_name or ""
             last_name = chat_member.user.last_name or ""
         except:
-            # Пробуем поискать по ID (если target - число)
             if target.isdigit():
                 chat_member = await context.bot.get_chat_member(chat_id, int(target))
                 target_user_id = chat_member.user.id
@@ -397,9 +593,7 @@ async def add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 last_name = chat_member.user.last_name or ""
     except Exception as e:
         logging.warning(f"Не удалось получить информацию для {target}: {e}")
-        # Сохраняем как есть
 
-    # Проверяем, есть ли уже информация о пользователе
     existing_info = get_user_info_by_username(actual_username)
     if not existing_info and target_user_id != 0:
         existing_info = get_user_info_by_id(target_user_id)
@@ -408,7 +602,6 @@ async def add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"ℹ️ Информация о @{actual_username} уже есть. Используйте `-инфо @{actual_username}` чтобы удалить.")
         return
 
-    # Сохраняем
     save_info(actual_username, first_name, last_name, target_user_id, info_text)
     await update.message.reply_text(f"✅ Информация для @{actual_username} сохранена: {info_text}")
 
@@ -421,12 +614,10 @@ async def remove_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
 
-    # Проверяем админские права
     if not await is_admin(context, chat_id, user_id):
         await update.message.reply_text("❌ Только админы могут использовать эту команду!")
         return
 
-    # Парсинг: -инфо @username
     match = re.match(r"^-\s*инфо\s+@?(\w+)$", message)
     if not match:
         await update.message.reply_text("📝 Используйте формат: `-инфо @username`", parse_mode="Markdown")
@@ -434,13 +625,11 @@ async def remove_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     target_username = match.group(1).lower()
 
-    # Проверяем, есть ли информация о пользователе
     existing_info = get_user_info_by_username(target_username)
     if not existing_info:
         await update.message.reply_text(f"ℹ️ Информации о @{target_username} не найдено.")
         return
 
-    # Удаляем информацию
     deleted_count = delete_user_info(target_username)
     if deleted_count > 0:
         await update.message.reply_text(f"🗑️ Информация о @{target_username} удалена.")
@@ -454,7 +643,6 @@ async def get_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = update.message.text
     
-    # Парсинг: !инфо @username
     match = re.match(r"^!\s*инфо\s+@?(\w+)$", message)
     if not match:
         await update.message.reply_text("📝 Используйте формат: `!инфо @username`", parse_mode="Markdown")
@@ -462,7 +650,6 @@ async def get_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     target_username = match.group(1).lower()
 
-    # Получаем информацию о пользователе
     user_info = get_user_info_by_username(target_username)
     
     if not user_info:
@@ -471,7 +658,6 @@ async def get_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     username, first_name, last_name, user_id, text = user_info
     
-    # Формируем отображаемое имя
     if username:
         display_name = f"@{username}"
     elif first_name and last_name:
@@ -481,13 +667,11 @@ async def get_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         display_name = f"id{user_id}"
     
-    # Формируем ссылку если есть user_id
     if user_id and user_id != 0:
         user_link = f"[{display_name}](tg://user?id={user_id})"
     else:
         user_link = display_name
     
-    # Заменяем 0 на ↔ в user_id при отображении
     user_id_display = "↔" if user_id == 0 else user_id
     
     response = f"👤 {user_link} | {user_id_display} | {text}"
@@ -507,52 +691,91 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif message.startswith('!инфо'):
         await get_info(update, context)
 
-# Обработчик для всех сообщений (для отладки)
-async def debug_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Получено сообщение: {update.message.text} от {update.effective_user.id}")
-
-# Запуск
-if __name__ == "__main__":
-    import time
+# Команда /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     
+    if is_bot_admin(user_id):
+        keyboard = [[InlineKeyboardButton("🛠️ Панель администратора", callback_data="admin_panel")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "👋 Привет! Я бот для управления информацией о пользователях.\n\n"
+            "📋 **Основные команды:**\n"
+            "/tops - Показать весь список информации (только для админов группы)\n"
+            "+инфо @username текст - Добавить информацию\n"
+            "-инфо @username - Удалить информацию\n"
+            "!инфо @username - Узнать информацию\n\n"
+            "🛠️ **Для владельцев бота доступна панель администратора:**",
+            reply_markup=reply_markup
+        )
+    else:
+        await update.message.reply_text(
+            "👋 Привет! Я бот для управления информацией о пользователях.\n\n"
+            "📋 **Основные команды:**\n"
+            "!инфо @username - Узнать информацию о пользователе\n\n"
+            "❓ Для добавления или удаления информации обратитесь к администраторам группы."
+        )
+
+# Главная функция
+async def main():
     # Инициализация базы данных
     init_db()
+    
+    # Загружаем администраторов
+    admins = get_admins()
+    logger.info(f"Загружены администраторы: {admins}")
     
     # Создание приложения
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Регистрируем обработчики команд для владельца бота
-    app.add_handler(CommandHandler("export_db", export_db))
-    app.add_handler(CommandHandler("export_logs", export_logs))
-    app.add_handler(CommandHandler("import_db", import_db))
-    app.add_handler(CommandHandler("help_admin", help_admin))
-    app.add_handler(CommandHandler("admins", show_admins))
-    
-    # Регистрируем обработчики команд для всех пользователей
+    # ConversationHandler для добавления админа
+    conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(add_admin_start, pattern="^add_admin_start$")],
+        states={
+            ADD_ADMIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_admin_process)],
+            CONFIRM_ADD_ADMIN: [CallbackQueryHandler(confirm_add_admin, pattern="^(confirm_add|cancel_add)$")]
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel_add_admin),
+            CallbackQueryHandler(back_to_admin_panel, pattern="^back_to_admin$")
+        ]
+    )
+
+    # Регистрация обработчиков
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("tops", tops))
     
-    # Регистрируем обработчик сообщений
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Обработчики для админ-панели
+    app.add_handler(CallbackQueryHandler(admin_panel_button, pattern="^(export_db|export_logs|import_db_info|list_admins)$"))
+    app.add_handler(CallbackQueryHandler(back_to_admin_panel, pattern="^back_to_admin$"))
+    app.add_handler(conv_handler)
     
-    # Добавляем обработчик для отладки (можно убрать после тестирования)
-    app.add_handler(MessageHandler(filters.ALL, debug_handler))
+    # Обработчик документов (для импорта БД)
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    
+    # Обработчик сообщений
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("=" * 50)
     print("🤖 Бот запущен...")
     print("=" * 50)
-    print(f"\n👑 Владельцы бота: {ADMIN_IDS}")
-    print("\n👑 Команды для владельцев бота:")
-    print("/export_db - Экспортировать базу данных")
-    print("/export_logs - Экспортировать логи бота")
-    print("/import_db - Импортировать базу данных (отправьте файл info.db)")
-    print("/help_admin - Справка по командам администратора")
-    print("/admins - Показать список владельцев бота")
-    print("\n👥 Команды для админов группы:")
-    print("/tops - Показать весь список информации")
+    print(f"💊 Главный владелец: {MAIN_OWNER_ID}")
+    print(f"👥 Администраторы: {admins}")
+    print("\n📋 Основные команды:")
+    print("/start - Начало работы")
+    print("/admin - Панель администратора (для владельцев бота)")
+    print("/tops - Весь список информации")
     print("+инфо @ник текст - добавить информацию")
     print("-инфо @ник - удалить информацию")
     print("!инфо @ник - узнать информацию")
-    print("\n📝 Логи сохраняются в файл bot.log")
+    print("\n🛠️ Для импорта БД: отправьте файл info.db в чат с ботом")
+    print("📝 Логи сохраняются в файл bot.log")
     print("=" * 50)
     
-    app.run_polling()
+    await app.run_polling()
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
