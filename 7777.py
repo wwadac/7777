@@ -508,6 +508,7 @@ async def process_db_import(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 # ========== ОСНОВНЫЕ КОМАНДЫ БОТА ==========
 
 # Команда /tops - ДОСТУПНА ВСЕМ!
+# Команда /tops - ДОСТУПНА ВСЕМ!
 async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         logger.info(f"Получена команда /tops от пользователя {update.effective_user.id}")
@@ -533,14 +534,18 @@ async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 display_name = f"id{user_id}"
             
+            # Используем HTML-разметку вместо Markdown для большей стабильности
             if user_id and user_id != 0:
-                user_link = f"[{display_name}](tg://user?id={user_id})"
+                user_link = f'<a href="tg://user?id={user_id}">{display_name}</a>'
             else:
                 user_link = display_name
             
             user_id_display = "↔" if user_id == 0 else user_id
             
-            response += f"{user_link} | {user_id_display} | {text}\n"
+            # Экранируем текст для HTML (если он содержит HTML-символы)
+            safe_text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            
+            response += f"{user_link} | {user_id_display} | {safe_text}\n"
 
         if len(response) > 4096:
             parts = []
@@ -557,13 +562,23 @@ async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
             for i, part in enumerate(parts):
                 if i == 0:
-                    await update.message.reply_text(part, parse_mode="Markdown", disable_web_page_preview=True)
+                    await update.message.reply_text(
+                        part, 
+                        parse_mode="HTML", 
+                        disable_web_page_preview=True
+                    )
                 else:
-                    await update.message.reply_text(f"📋 Продолжение ({i+1}/{len(parts)}):\n\n{part}", 
-                                                  parse_mode="Markdown", 
-                                                  disable_web_page_preview=True)
+                    await update.message.reply_text(
+                        f"📋 Продолжение ({i+1}/{len(parts)}):\n\n{part}", 
+                        parse_mode="HTML", 
+                        disable_web_page_preview=True
+                    )
         else:
-            await update.message.reply_text(response, parse_mode="Markdown", disable_web_page_preview=True)
+            await update.message.reply_text(
+                response, 
+                parse_mode="HTML", 
+                disable_web_page_preview=True
+            )
             
     except Exception as e:
         logger.error(f"Ошибка в команде /tops: {e}")
@@ -823,3 +838,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
