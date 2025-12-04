@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Токен бота (замените на свой)
 BOT_TOKEN = "8534057742:AAFfm2gswdz-b6STcrWcCdRfaToRDkPUu0A"
 # ID администратора (замените на свой Telegram ID)
-ADMIN_ID = 6893832048, 8000395560  # Ваш Telegram ID
+ADMIN_ID = [6893832048, 8000395560] # Ваш Telegram ID
 
 # Инициализация базы данных
 def init_db():
@@ -539,4 +539,5 @@ if __name__ == "__main__":
     print("=" * 50)
     
     app.run_polling()
+
 
