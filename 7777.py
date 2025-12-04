@@ -4,6 +4,7 @@ import re
 import json
 import os
 import time
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -156,7 +157,7 @@ async def is_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: in
 
 # ========== КОМАНДЫ ДЛЯ ВЛАДЕЛЬЦЕВ БОТА ==========
 
-# Команда /admin_panel - панель администратора
+# Команда /admin - панель администратора
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
@@ -267,9 +268,11 @@ async def list_admins_command(query, context):
         try:
             user = await context.bot.get_chat(admin_id)
             name = f"@{user.username}" if user.username else f"{user.first_name or 'User'}"
-            admin_list += f"• {name} (ID: `{admin_id}`)\n"
+            owner_type = "👑 Главный" if admin_id == MAIN_OWNER_ID else "👤 Админ"
+            admin_list += f"• {name} (ID: `{admin_id}`) - {owner_type}\n"
         except:
-            admin_list += f"• ID: `{admin_id}`\n"
+            owner_type = "👑 Главный" if admin_id == MAIN_OWNER_ID else "👤 Админ"
+            admin_list += f"• ID: `{admin_id}` - {owner_type}\n"
     
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_admin")]]
     
@@ -280,7 +283,7 @@ async def list_admins_command(query, context):
     )
 
 # Добавление админа - начало
-async def add_admin_start(query, context):
+async def add_admin_start(query, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         "➕ **Добавление администратора**\n\n"
         "Отправьте ID пользователя, которого хотите добавить.\n"
@@ -298,7 +301,7 @@ async def add_admin_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     
     try:
-        new_admin_id = int(update.message.text)
+        new_admin_id = int(update.message.text.strip())
         
         if new_admin_id == MAIN_OWNER_ID:
             await update.message.reply_text("❌ Этот пользователь уже является главным владельцем!")
@@ -398,8 +401,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if document.file_name == "info.db":
         await process_db_import(update, context, document)
     else:
-        # Если это не info.db, но администратор отправил другой файл
-        # Можем показать подсказку
         await update.message.reply_text(
             "📁 Для импорта базы данных отправьте файл с именем `info.db`",
             parse_mode="Markdown"
@@ -410,15 +411,16 @@ async def process_db_import(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     chat_id = update.message.chat_id
     
     try:
-        # Создаем папку для временных файлов
-        os.makedirs("temp", exist_ok=True)
-        
         # Уведомляем о начале загрузки
         status_msg = await update.message.reply_text("⬇️ Загрузка файла базы данных...")
         
+        # Создаем временную папку
+        temp_dir = "temp_import"
+        os.makedirs(temp_dir, exist_ok=True)
+        
         # Скачиваем файл
         file = await context.bot.get_file(document.file_id)
-        temp_path = f"temp/info_{int(time.time())}.db"
+        temp_path = f"{temp_dir}/info_{int(time.time())}.db"
         await file.download_to_drive(temp_path)
         
         await status_msg.edit_text("🔍 Проверка файла базы данных...")
@@ -437,9 +439,11 @@ async def process_db_import(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             expected_columns = ['id', 'username', 'first_name', 'last_name', 'user_id', 'text', 'created_at']
             actual_columns = [col[1] for col in columns]
             
+            # Проверяем наличие основных столбцов
             if not all(col in actual_columns for col in expected_columns[:6]):
                 await status_msg.edit_text("❌ Неверная структура базы данных!")
                 os.remove(temp_path)
+                os.rmdir(temp_dir)
                 return
             
             await status_msg.edit_text(f"✅ Файл проверен. Записей: {count}\n\nСоздаю резервную копию...")
@@ -448,14 +452,16 @@ async def process_db_import(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             if os.path.exists("info.db"):
                 backup_name = f"info.db.backup_{int(time.time())}"
                 os.rename("info.db", backup_name)
+                logger.info(f"Создана резервная копия: {backup_name}")
             
             # Заменяем текущую БД
             os.rename(temp_path, "info.db")
             
             # Очищаем временную папку
-            for file in os.listdir("temp"):
-                os.remove(f"temp/{file}")
-            os.rmdir("temp")
+            try:
+                os.rmdir(temp_dir)
+            except:
+                pass  # Игнорируем если папка не пустая
             
             await status_msg.edit_text(
                 f"✅ База данных успешно импортирована!\n"
@@ -463,14 +469,22 @@ async def process_db_import(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 f"🔄 Бот будет перезагружен через 3 секунды..."
             )
             
-            # Ждем 3 секунды и перезагружаемся
+            logger.info(f"База данных импортирована пользователем {user_id}. Записей: {count}")
+            
+            # Ждем 3 секунды
             await asyncio.sleep(3)
+            
+            # Завершаем работу
             os._exit(0)
             
         except sqlite3.Error as e:
             await status_msg.edit_text(f"❌ Ошибка в базе данных: {str(e)}")
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+            try:
+                os.rmdir(temp_dir)
+            except:
+                pass
             
     except Exception as e:
         logger.error(f"Ошибка при импорте БД: {e}")
@@ -718,7 +732,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # Главная функция
-async def main():
+def main():
     # Инициализация базы данных
     init_db()
     
@@ -748,7 +762,7 @@ async def main():
     app.add_handler(CommandHandler("tops", tops))
     
     # Обработчики для админ-панели
-    app.add_handler(CallbackQueryHandler(admin_panel_button, pattern="^(export_db|export_logs|import_db_info|list_admins)$"))
+    app.add_handler(CallbackQueryHandler(admin_panel_button, pattern="^(export_db|export_logs|import_db_info|list_admins|admin_panel)$"))
     app.add_handler(CallbackQueryHandler(back_to_admin_panel, pattern="^back_to_admin$"))
     app.add_handler(conv_handler)
     
@@ -761,21 +775,21 @@ async def main():
     print("=" * 50)
     print("🤖 Бот запущен...")
     print("=" * 50)
-    print(f"💊 Главный владелец: {MAIN_OWNER_ID}")
+    print(f" Главный владелец: {MAIN_OWNER_ID}")
     print(f"👥 Администраторы: {admins}")
     print("\n📋 Основные команды:")
     print("/start - Начало работы")
     print("/admin - Панель администратора (для владельцев бота)")
-    print("/tops - Весь список информации")
-    print("+инфо @ник текст - добавить информацию")
-    print("-инфо @ник - удалить информацию")
+    print("/tops - Весь список информации (для админов группы)")
+    print("+инфо @ник текст - добавить информацию (для админов группы)")
+    print("-инфо @ник - удалить информацию (для админов группы)")
     print("!инфо @ник - узнать информацию")
     print("\n🛠️ Для импорта БД: отправьте файл info.db в чат с ботом")
     print("📝 Логи сохраняются в файл bot.log")
     print("=" * 50)
     
-    await app.run_polling()
+    # Запуск бота
+    app.run_polling()
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
