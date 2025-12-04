@@ -673,6 +673,7 @@ async def remove_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Не удалось удалить информацию о @{target_username}.")
 
 # Обработчик !инфо - ДОСТУПНА ВСЕМ!
+# Обработчик !инфо - ДОСТУПНА ВСЕМ!
 async def get_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -703,15 +704,19 @@ async def get_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         display_name = f"id{user_id}"
     
+    # Используем HTML-разметку вместо Markdown
     if user_id and user_id != 0:
-        user_link = f"[{display_name}](tg://user?id={user_id})"
+        user_link = f'<a href="tg://user?id={user_id}">{display_name}</a>'
     else:
         user_link = display_name
     
     user_id_display = "↔" if user_id == 0 else user_id
     
-    response = f"👤 {user_link} | {user_id_display} | {text}"
-    await update.message.reply_text(response, parse_mode="Markdown", disable_web_page_preview=True)
+    # Экранируем текст для HTML
+    safe_text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
+    response = f"👤 {user_link} | {user_id_display} | {safe_text}"
+    await update.message.reply_text(response, parse_mode="HTML", disable_web_page_preview=True)
 
 # Основной обработчик сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -838,4 +843,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
