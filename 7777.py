@@ -15,8 +15,11 @@ from telegram.ext import (
 
 # Настройка логирования
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    level=logging.INFO,
+    filename='bot.log'  # Добавляем запись логов в файл
 )
+logger = logging.getLogger(__name__)
 
 # Токен бота (замените на свой)
 BOT_TOKEN = "8534057742:AAFfm2gswdz-b6STcrWcCdRfaToRDkPUu0A"
@@ -90,47 +93,90 @@ def delete_user_info(username: str):
 
 # Проверка админских прав
 async def is_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
-    admins = await context.bot.get_chat_administrators(chat_id)
-    admin_ids = [admin.user.id for admin in admins]
-    return user_id in admin_ids
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+        admin_ids = [admin.user.id for admin in admins]
+        return user_id in admin_ids
+    except Exception as e:
+        logger.error(f"Ошибка при проверке прав администратора: {e}")
+        # Если не удалось получить список админов, разрешаем доступ только владельцу бота
+        return user_id == ADMIN_ID
 
 # Обработчик команды /tops
 async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows = get_all_info()
-    if not rows:
-        await update.message.reply_text("📭 Список пуст.")
-        return
+    try:
+        logger.info(f"Получена команда /tops от пользователя {update.effective_user.id}")
+        
+        # Проверяем, что команда пришла в групповом чате
+        if update.effective_chat.type not in ['group', 'supergroup']:
+            await update.message.reply_text("❌ Эта команда доступна только в группах!")
+            return
+            
+        # Проверяем админские права (опционально, можно убрать если нужно всем)
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        
+        if not await is_admin(context, chat_id, user_id):
+            await update.message.reply_text("❌ Только администраторы могут использовать эту команду!")
+            return
+            
+        rows = get_all_info()
+        if not rows:
+            await update.message.reply_text("📭 Список пуст.")
+            return
 
-    response = "📋 Список информации:\n\n"
-    for username, first_name, last_name, user_id, text in rows:
-        # Формируем отображаемое имя
-        if username:
-            display_name = f"@{username}"
-        elif first_name and last_name:
-            display_name = f"{first_name} {last_name}"
-        elif first_name:
-            display_name = first_name
-        else:
-            display_name = f"id{user_id}"
-        
-        # Формируем ссылку если есть user_id
-        if user_id and user_id != 0:
-            # Создаем Markdown ссылку на аккаунт
-            user_link = f"[{display_name}](tg://user?id={user_id})"
-        else:
-            user_link = display_name
-        
-        # Заменяем 0 на ↔ в user_id при отображении
-        user_id_display = "↔" if user_id == 0 else user_id
-        
-        response += f"{user_link} | {user_id_display} | {text}\n"
+        response = "📋 Список информации:\n\n"
+        for username, first_name, last_name, user_id, text in rows:
+            # Формируем отображаемое имя
+            if username:
+                display_name = f"@{username}"
+            elif first_name and last_name:
+                display_name = f"{first_name} {last_name}"
+            elif first_name:
+                display_name = first_name
+            else:
+                display_name = f"id{user_id}"
+            
+            # Формируем ссылку если есть user_id
+            if user_id and user_id != 0:
+                # Создаем Markdown ссылку на аккаунт
+                user_link = f"[{display_name}](tg://user?id={user_id})"
+            else:
+                user_link = display_name
+            
+            # Заменяем 0 на ↔ в user_id при отображении
+            user_id_display = "↔" if user_id == 0 else user_id
+            
+            response += f"{user_link} | {user_id_display} | {text}\n"
 
-    # Если сообщение слишком длинное, разбиваем на части
-    if len(response) > 4096:
-        for i in range(0, len(response), 4096):
-            await update.message.reply_text(response[i:i+4096], parse_mode="Markdown", disable_web_page_preview=True)
-    else:
-        await update.message.reply_text(response, parse_mode="Markdown", disable_web_page_preview=True)
+        # Если сообщение слишком длинное, разбиваем на части
+        if len(response) > 4096:
+            parts = []
+            current_part = ""
+            for line in response.split('\n'):
+                if len(current_part) + len(line) + 1 > 4096:
+                    parts.append(current_part)
+                    current_part = line + '\n'
+                else:
+                    current_part += line + '\n'
+            
+            if current_part:
+                parts.append(current_part)
+                
+            for i, part in enumerate(parts):
+                if i == 0:
+                    await update.message.reply_text(part, parse_mode="Markdown", disable_web_page_preview=True)
+                else:
+                    # Для последующих сообщений добавляем заголовок
+                    await update.message.reply_text(f"📋 Продолжение ({i+1}/{len(parts)}):\n\n{part}", 
+                                                  parse_mode="Markdown", 
+                                                  disable_web_page_preview=True)
+        else:
+            await update.message.reply_text(response, parse_mode="Markdown", disable_web_page_preview=True)
+            
+    except Exception as e:
+        logger.error(f"Ошибка в команде /tops: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при выполнении команды. Проверьте логи бота.")
 
 # Обработчик +инфо
 async def add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -293,6 +339,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif message.startswith('!инфо'):
         await get_info(update, context)
 
+# Обработчик для всех сообщений (для отладки)
+async def debug_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Получено сообщение: {update.message.text} от {update.effective_user.id}")
+
 # Запуск
 if __name__ == "__main__":
     # Инициализация базы данных
@@ -306,6 +356,9 @@ if __name__ == "__main__":
     
     # Регистрируем обработчик сообщений
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Добавляем обработчик для отладки (можно убрать после тестирования)
+    app.add_handler(MessageHandler(filters.ALL, debug_handler))
 
     print("Бот запущен...")
     print("Основные команды:")
@@ -313,5 +366,6 @@ if __name__ == "__main__":
     print("-инфо @ник - удалить информацию")
     print("!инфо @ник - узнать информацию")
     print("/tops - весь список (с кликабельными ссылками)")
+    print("Логи сохраняются в файл bot.log")
     
     app.run_polling()
