@@ -4,6 +4,7 @@ import re
 import json
 import os
 import time
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -144,7 +145,7 @@ def delete_user_info(username: str):
     conn.close()
     return deleted_count
 
-# Проверка админских прав в группе
+# Проверка админских прав в группе (для +инфо, -инфо)
 async def is_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
     try:
         admins = await context.bot.get_chat_administrators(chat_id)
@@ -152,7 +153,7 @@ async def is_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: in
         return user_id in admin_ids
     except Exception as e:
         logger.error(f"Ошибка при проверке прав администратора: {e}")
-        return is_bot_admin(user_id)
+        return False
 
 # ========== КОМАНДЫ ДЛЯ ВЛАДЕЛЬЦЕВ БОТА ==========
 
@@ -401,18 +402,20 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Проверяем, что отправитель - администратор бота
     if not is_bot_admin(user_id):
+        await update.message.reply_text("❌ Только владельцы бота могут импортировать базу данных!")
         return
     
     document = update.message.document
     
     # Проверяем, что это файл базы данных
-    if document.file_name == "info.db":
-        await process_db_import(update, context, document)
-    else:
+    if document.file_name != "info.db":
         await update.message.reply_text(
             "📁 Для импорта базы данных отправьте файл с именем `info.db`",
             parse_mode="Markdown"
         )
+        return
+    
+    await process_db_import(update, context, document)
 
 async def process_db_import(update: Update, context: ContextTypes.DEFAULT_TYPE, document):
     user_id = update.effective_user.id
@@ -448,10 +451,19 @@ async def process_db_import(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             actual_columns = [col[1] for col in columns]
             
             # Проверяем наличие основных столбцов
-            if not all(col in actual_columns for col in expected_columns[:6]):
-                await status_msg.edit_text("❌ Неверная структура базы данных!")
-                os.remove(temp_path)
-                os.rmdir(temp_dir)
+            required_columns = ['username', 'first_name', 'last_name', 'user_id', 'text']
+            column_names = [col[1] for col in columns]
+            
+            missing_columns = [col for col in required_columns if col not in column_names]
+            
+            if missing_columns:
+                await status_msg.edit_text(f"❌ Неверная структура базы данных! Отсутствуют столбцы: {missing_columns}")
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                try:
+                    os.rmdir(temp_dir)
+                except:
+                    pass
                 return
             
             await status_msg.edit_text(f"✅ Файл проверен. Записей: {count}\n\nСоздаю резервную копию...")
@@ -474,17 +486,10 @@ async def process_db_import(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await status_msg.edit_text(
                 f"✅ База данных успешно импортирована!\n"
                 f"📊 Записей в базе: {count}\n\n"
-                f"🔄 Бот будет перезагружен через 3 секунды..."
+                f"🔄 Бот продолжает работу с новой базой данных."
             )
             
             logger.info(f"База данных импортирована пользователем {user_id}. Записей: {count}")
-            
-            # Ждем 3 секунды
-            import asyncio
-            await asyncio.sleep(3)
-            
-            # Завершаем работу
-            os._exit(0)
             
         except sqlite3.Error as e:
             await status_msg.edit_text(f"❌ Ошибка в базе данных: {str(e)}")
@@ -494,6 +499,7 @@ async def process_db_import(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 os.rmdir(temp_dir)
             except:
                 pass
+            logger.error(f"Ошибка при импорте БД: {e}")
             
     except Exception as e:
         logger.error(f"Ошибка при импорте БД: {e}")
@@ -501,7 +507,7 @@ async def process_db_import(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 # ========== ОСНОВНЫЕ КОМАНДЫ БОТА ==========
 
-# Команда /tops
+# Команда /tops - ДОСТУПНА ВСЕМ!
 async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         logger.info(f"Получена команда /tops от пользователя {update.effective_user.id}")
@@ -509,14 +515,6 @@ async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Проверяем, что команда пришла в групповом чате
         if update.effective_chat.type not in ['group', 'supergroup']:
             await update.message.reply_text("❌ Эта команда доступна только в группах!")
-            return
-            
-        # Проверяем админские права
-        chat_id = update.effective_chat.id
-        user_id = update.effective_user.id
-        
-        if not await is_admin(context, chat_id, user_id):
-            await update.message.reply_text("❌ Только администраторы могут использовать эту команду!")
             return
             
         rows = get_all_info()
@@ -571,7 +569,7 @@ async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка в команде /tops: {e}")
         await update.message.reply_text("❌ Произошла ошибка при выполнении команды.")
 
-# Обработчик +инфо
+# Обработчик +инфо - ТОЛЬКО ДЛЯ АДМИНОВ ГРУППЫ
 async def add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -628,7 +626,7 @@ async def add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_info(actual_username, first_name, last_name, target_user_id, info_text)
     await update.message.reply_text(f"✅ Информация для @{actual_username} сохранена: {info_text}")
 
-# Обработчик -инфо
+# Обработчик -инфо - ТОЛЬКО ДЛЯ АДМИНОВ ГРУППЫ
 async def remove_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -659,7 +657,7 @@ async def remove_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"⚠️ Не удалось удалить информацию о @{target_username}.")
 
-# Обработчик !инфо
+# Обработчик !инфо - ДОСТУПНА ВСЕМ!
 async def get_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -725,9 +723,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "👋 Привет! Я бот для управления информацией о пользователях.\n\n"
             "📋 **Основные команды:**\n"
-            "/tops - Показать весь список информации (только для админов группы)\n"
-            "+инфо @username текст - Добавить информацию\n"
-            "-инфо @username - Удалить информацию\n"
+            "/tops - Показать весь список информации\n"
+            "+инфо @username текст - Добавить информацию (только для админов группы)\n"
+            "-инфо @username - Удалить информацию (только для админов группы)\n"
             "!инфо @username - Узнать информацию\n\n"
             "🛠️ **Для владельцев бота доступна панель администратора:**",
             reply_markup=reply_markup
@@ -736,9 +734,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "👋 Привет! Я бот для управления информацией о пользователях.\n\n"
             "📋 **Основные команды:**\n"
+            "/tops - Показать весь список информации\n"
             "!инфо @username - Узнать информацию о пользователе\n\n"
             "❓ Для добавления или удаления информации обратитесь к администраторам группы."
         )
+
+# Команда /help
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = """
+📋 **Доступные команды:**
+
+/tops - показать весь список информации
++инфо - добавить информацию о пользователе (только для админов группы)
+-инфо - удалить информацию о пользователе (только для админов группы)
+!инфо - узнать информацию о конкретном пользователе
+
+🛠️ **Администраторам бота также доступно:**
+/admin - панель администратора бота
+    """
+    await update.message.reply_text(help_text, parse_mode="Markdown")
 
 # Главная функция
 def main():
@@ -769,16 +783,17 @@ def main():
             CommandHandler("cancel", cancel_add_admin),
             CallbackQueryHandler(back_to_admin_panel, pattern="^back_to_admin$")
         ],
-        per_message=True  # Добавляем эту настройку
+        per_message=True
     )
 
     # Регистрация обработчиков
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("tops", tops))
     
     # Обработчики для админ-панели
-    app.add_handler(CallbackQueryHandler(admin_panel_button, pattern="^(export_db|export_logs|import_db_info|list_admins)$"))
+    app.add_handler(CallbackQueryHandler(admin_panel_button, pattern="^(export_db|export_logs|import_db_info|list_admins|admin_panel)$"))
     app.add_handler(CallbackQueryHandler(back_to_admin_panel, pattern="^back_to_admin$"))
     app.add_handler(conv_handler)
     
@@ -791,16 +806,15 @@ def main():
     print("=" * 50)
     print("🤖 Бот запущен...")
     print("=" * 50)
-    print(f"👑 Главный владелец: {MAIN_OWNER_ID}")
+    print(f"Главный владелец: {MAIN_OWNER_ID}")
     print(f"👥 Администраторы: {admins}")
     print("\n📋 Основные команды:")
-    print("/start - Начало работы")
-    print("/admin - Панель администратора (для владельцев бота)")
-    print("/tops - Весь список информации (для админов группы)")
-    print("+инфо @ник текст - добавить информацию (для админов группы)")
-    print("-инфо @ник - удалить информацию (для админов группы)")
-    print("!инфо @ник - узнать информацию")
-    print("\n🛠️ Для импорта БД: отправьте файл info.db в чат с ботом")
+    print("/help - Справка по командам")
+    print("/tops - Весь список информации (доступно всем)")
+    print("+инфо @ник текст - добавить информацию (только для админов группы)")
+    print("-инфо @ник - удалить информацию (только для админов группы)")
+    print("!инфо @ник - узнать информацию (доступно всем)")
+    print("\n🛠️ Для импорта БД: отправьте файл info.db в чат с ботом (только для владельцев бота)")
     print("📝 Логи сохраняются в файл bot.log")
     print("=" * 50)
     
