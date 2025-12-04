@@ -3,6 +3,7 @@ import sqlite3
 import re
 import json
 import csv
+import os
 from io import BytesIO, StringIO
 from telegram import Update
 from telegram.ext import (
@@ -101,6 +102,161 @@ async def is_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: in
         logger.error(f"Ошибка при проверке прав администратора: {e}")
         # Если не удалось получить список админов, разрешаем доступ только владельцу бота
         return user_id == ADMIN_ID
+
+# Проверка что пользователь - владелец бота (ADMIN_ID)
+def is_bot_owner(user_id: int) -> bool:
+    return user_id == ADMIN_ID
+
+# Обработчик команды /export_db
+async def export_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = update.effective_user.id
+        
+        # Проверяем, что команду вызвал владелец бота
+        if not is_bot_owner(user_id):
+            await update.message.reply_text("❌ Эта команда доступна только владельцу бота!")
+            return
+            
+        # Проверяем существование базы данных
+        if not os.path.exists("info.db"):
+            await update.message.reply_text("❌ База данных не найдена!")
+            return
+            
+        # Отправляем файл базы данных
+        with open("info.db", "rb") as db_file:
+            await update.message.reply_document(
+                document=db_file,
+                filename="info.db",
+                caption="📦 База данных бота"
+            )
+        logger.info(f"База данных экспортирована пользователем {user_id}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при экспорте базы данных: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при экспорте базы данных!")
+
+# Обработчик команды /export_logs
+async def export_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = update.effective_user.id
+        
+        # Проверяем, что команду вызвал владелец бота
+        if not is_bot_owner(user_id):
+            await update.message.reply_text("❌ Эта команда доступна только владельцу бота!")
+            return
+            
+        # Проверяем существование файла логов
+        if not os.path.exists("bot.log"):
+            await update.message.reply_text("❌ Файл логов не найден!")
+            return
+            
+        # Отправляем файл логов
+        with open("bot.log", "rb") as log_file:
+            await update.message.reply_document(
+                document=log_file,
+                filename="bot.log",
+                caption="📋 Логи бота"
+            )
+        logger.info(f"Логи экспортированы пользователем {user_id}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при экспорте логов: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при экспорте логов!")
+
+# Обработчик команды /import_db
+async def import_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = update.effective_user.id
+        
+        # Проверяем, что команду вызвал владелец бота
+        if not is_bot_owner(user_id):
+            await update.message.reply_text("❌ Эта команда доступна только владельцу бота!")
+            return
+        
+        # Проверяем, что сообщение содержит документ
+        if not update.message.document:
+            await update.message.reply_text(
+                "📁 Для импорта базы данных отправьте файл info.db в ответ на это сообщение\n\n"
+                "⚠️ **Внимание:** Существующая база данных будет перезаписана!"
+            )
+            return
+        
+        # Проверяем имя файла
+        document = update.message.document
+        if document.file_name != "info.db":
+            await update.message.reply_text("❌ Неверный файл. Ожидается файл с именем 'info.db'")
+            return
+        
+        # Скачиваем файл
+        file = await context.bot.get_file(document.file_id)
+        
+        # Создаем резервную копию текущей базы данных
+        if os.path.exists("info.db"):
+            os.rename("info.db", "info.db.backup")
+            logger.info("Создана резервная копия базы данных")
+        
+        # Сохраняем новую базу данных
+        await file.download_to_drive("info.db")
+        
+        # Проверяем валидность базы данных
+        try:
+            conn = sqlite3.connect("info.db")
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM user_info")
+            count = cursor.fetchone()[0]
+            conn.close()
+            
+            await update.message.reply_text(
+                f"✅ База данных успешно импортирована!\n"
+                f"📊 Записей в базе: {count}\n\n"
+                f"🔄 Бот будет перезагружен для применения изменений..."
+            )
+            
+            # Перезапускаем бота
+            os._exit(0)
+            
+        except sqlite3.Error as e:
+            # Восстанавливаем резервную копию при ошибке
+            if os.path.exists("info.db.backup"):
+                os.remove("info.db")
+                os.rename("info.db.backup", "info.db")
+            
+            await update.message.reply_text(f"❌ Ошибка в импортированной базе данных: {e}")
+            logger.error(f"Ошибка при импорте базы данных: {e}")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при импорте базы данных: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при импорте базы данных!")
+
+# Обработчик команды /help_admin
+async def help_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not is_bot_owner(user_id):
+        await update.message.reply_text("❌ Эта команда доступна только владельцу бота!")
+        return
+    
+    help_text = """
+🛠️ **Команды для администратора бота:**
+
+/export_db - Экспортировать базу данных
+/export_logs - Экспортировать логи бота
+/import_db - Импортировать базу данных (отправьте файл info.db в ответ)
+/help_admin - Показать это сообщение
+
+📝 **Команды для админов группы:**
+/tops - Показать весь список информации
++инфо @username текст - Добавить информацию
+-инфо @username - Удалить информацию
+!инфо @username - Узнать информацию
+
+⚠️ **Важно:**
+- При импорте базы данных старая будет заменена
+- Рекомендуется сделать экспорт перед импортом
+- Бот перезагружается после импорта базы данных
+    """
+    
+    await update.message.reply_text(help_text, parse_mode="Markdown")
 
 # Обработчик команды /tops
 async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -351,7 +507,13 @@ if __name__ == "__main__":
     # Создание приложения
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Регистрируем обработчики команд
+    # Регистрируем обработчики команд для владельца бота
+    app.add_handler(CommandHandler("export_db", export_db))
+    app.add_handler(CommandHandler("export_logs", export_logs))
+    app.add_handler(CommandHandler("import_db", import_db))
+    app.add_handler(CommandHandler("help_admin", help_admin))
+    
+    # Регистрируем обработчики команд для всех пользователей
     app.add_handler(CommandHandler("tops", tops))
     
     # Регистрируем обработчик сообщений
@@ -360,12 +522,20 @@ if __name__ == "__main__":
     # Добавляем обработчик для отладки (можно убрать после тестирования)
     app.add_handler(MessageHandler(filters.ALL, debug_handler))
 
-    print("Бот запущен...")
-    print("Основные команды:")
+    print("=" * 50)
+    print("🤖 Бот запущен...")
+    print("=" * 50)
+    print("\n🎃 Команды для владельца бота (ADMIN_ID):")
+    print("/export_db - Экспортировать базу данных")
+    print("/export_logs - Экспортировать логи бота")
+    print("/import_db - Импортировать базу данных (отправьте файл info.db)")
+    print("/help_admin - Справка по командам администратора")
+    print("\n👥 Команды для админов группы:")
+    print("/tops - Показать весь список информации")
     print("+инфо @ник текст - добавить информацию")
     print("-инфо @ник - удалить информацию")
     print("!инфо @ник - узнать информацию")
-    print("/tops - весь список (с кликабельными ссылками)")
-    print("Логи сохраняются в файл bot.log")
+    print("\n📝 Логи сохраняются в файл bot.log")
+    print("=" * 50)
     
     app.run_polling()
