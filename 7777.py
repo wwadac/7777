@@ -4,7 +4,6 @@ import re
 import json
 import os
 import time
-import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -283,7 +282,16 @@ async def list_admins_command(query, context):
     )
 
 # Добавление админа - начало
-async def add_admin_start(query, context: ContextTypes.DEFAULT_TYPE):
+async def add_admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    
+    if not is_main_owner(user_id):
+        await query.edit_message_text("❌ Только главный владелец может добавлять админов!")
+        return ConversationHandler.END
+    
     await query.edit_message_text(
         "➕ **Добавление администратора**\n\n"
         "Отправьте ID пользователя, которого хотите добавить.\n"
@@ -472,6 +480,7 @@ async def process_db_import(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             logger.info(f"База данных импортирована пользователем {user_id}. Записей: {count}")
             
             # Ждем 3 секунды
+            import asyncio
             await asyncio.sleep(3)
             
             # Завершаем работу
@@ -743,17 +752,24 @@ def main():
     # Создание приложения
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # ConversationHandler для добавления админа
+    # ConversationHandler для добавления админа с исправленными настройками
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_admin_start, pattern="^add_admin_start$")],
         states={
-            ADD_ADMIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_admin_process)],
-            CONFIRM_ADD_ADMIN: [CallbackQueryHandler(confirm_add_admin, pattern="^(confirm_add|cancel_add)$")]
+            ADD_ADMIN: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, add_admin_process),
+                CallbackQueryHandler(back_to_admin_panel, pattern="^back_to_admin$")
+            ],
+            CONFIRM_ADD_ADMIN: [
+                CallbackQueryHandler(confirm_add_admin, pattern="^(confirm_add|cancel_add)$"),
+                CallbackQueryHandler(back_to_admin_panel, pattern="^back_to_admin$")
+            ]
         },
         fallbacks=[
             CommandHandler("cancel", cancel_add_admin),
             CallbackQueryHandler(back_to_admin_panel, pattern="^back_to_admin$")
-        ]
+        ],
+        per_message=True  # Добавляем эту настройку
     )
 
     # Регистрация обработчиков
@@ -762,7 +778,7 @@ def main():
     app.add_handler(CommandHandler("tops", tops))
     
     # Обработчики для админ-панели
-    app.add_handler(CallbackQueryHandler(admin_panel_button, pattern="^(export_db|export_logs|import_db_info|list_admins|admin_panel)$"))
+    app.add_handler(CallbackQueryHandler(admin_panel_button, pattern="^(export_db|export_logs|import_db_info|list_admins)$"))
     app.add_handler(CallbackQueryHandler(back_to_admin_panel, pattern="^back_to_admin$"))
     app.add_handler(conv_handler)
     
@@ -775,7 +791,7 @@ def main():
     print("=" * 50)
     print("🤖 Бот запущен...")
     print("=" * 50)
-    print(f" Главный владелец: {MAIN_OWNER_ID}")
+    print(f"👑 Главный владелец: {MAIN_OWNER_ID}")
     print(f"👥 Администраторы: {admins}")
     print("\n📋 Основные команды:")
     print("/start - Начало работы")
