@@ -145,6 +145,39 @@ def delete_user_info(username: str):
     conn.close()
     return deleted_count
 
+# Очистка базы данных от проблемных записей
+def clean_database():
+    """Очистка базы данных от проблемных символов в тексте"""
+    conn = sqlite3.connect("info.db")
+    cursor = conn.cursor()
+    
+    # Получаем все записи
+    cursor.execute("SELECT id, username, first_name, last_name, user_id, text FROM user_info")
+    rows = cursor.fetchall()
+    
+    cleaned_count = 0
+    for row in rows:
+        row_id, username, first_name, last_name, user_id, text = row
+        
+        # Проверяем текст на наличие проблемных символов
+        if text:
+            # Экранируем HTML-символы
+            clean_text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            
+            # Также можно убрать лишние символы разметки
+            clean_text = re.sub(r'[`_*\[\]()~]', ' ', clean_text)
+            
+            # Обновляем запись, если текст изменился
+            if clean_text != text:
+                cursor.execute("UPDATE user_info SET text = ? WHERE id = ?", (clean_text, row_id))
+                logger.info(f"Очищена запись ID {row_id}: {text[:50]}... -> {clean_text[:50]}...")
+                cleaned_count += 1
+    
+    conn.commit()
+    conn.close()
+    logger.info(f"Очистка базы данных завершена. Очищено записей: {cleaned_count}")
+    return cleaned_count
+
 # Проверка админских прав в группе (для +инфо, -инфо)
 async def is_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
     try:
@@ -508,7 +541,6 @@ async def process_db_import(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 # ========== ОСНОВНЫЕ КОМАНДЫ БОТА ==========
 
 # Команда /tops - ДОСТУПНА ВСЕМ!
-# Команда /tops - ДОСТУПНА ВСЕМ!
 async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         logger.info(f"Получена команда /tops от пользователя {update.effective_user.id}")
@@ -673,7 +705,6 @@ async def remove_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Не удалось удалить информацию о @{target_username}.")
 
 # Обработчик !инфо - ДОСТУПНА ВСЕМ!
-# Обработчик !инфо - ДОСТУПНА ВСЕМ!
 async def get_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -779,6 +810,9 @@ def main():
     # Инициализация базы данных
     init_db()
     
+    # Очистка базы данных от проблемных символов
+    cleaned_count = clean_database()
+    
     # Загружаем администраторов
     admins = get_admins()
     logger.info(f"Загружены администраторы: {admins}")
@@ -826,8 +860,9 @@ def main():
     print("=" * 50)
     print("🤖 Бот запущен...")
     print("=" * 50)
-    print(f"Главный владелец: {MAIN_OWNER_ID}")
+    print(f"👑 Главный владелец: {MAIN_OWNER_ID}")
     print(f"👥 Администраторы: {admins}")
+    print(f"🧹 Очищено записей в БД: {cleaned_count}")
     print("\n📋 Основные команды:")
     print("/help - Справка по командам")
     print("/tops - Весь список информации (доступно всем)")
@@ -843,5 +878,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
