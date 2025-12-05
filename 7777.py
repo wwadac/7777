@@ -2,10 +2,9 @@ import logging
 import sqlite3
 import os
 import shutil
+import json
 from datetime import datetime
-from typing import Dict, List
-import apscheduler
-from apscheduler.schedulers.background import BackgroundScheduler
+from typing import Dict, List, Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, 
@@ -16,11 +15,10 @@ from telegram.ext import (
     ConversationHandler,
     filters
 )
-from telegram.error import BadRequest
 
 # ========== КОНФИГУРАЦИЯ ==========
 TOKEN = "8534057742:AAFfm2gswdz-b6STcrWcCdRfaToRDkPUu0A"
-ADMIN_IDS = ["6893832048"]  # ТОЛЬКО ВАШ ID
+ADMIN_IDS = [6893832048]  # Только ваш ID
 DB_FILE = "info.db"
 BACKUP_DIR = "backups"
 LOG_FILE = "bot.log"
@@ -37,7 +35,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Состояния для ConversationHandler
-SELECTING_ACTION, TYPING_NICKNAME, TYPING_INFO, CONFIRM_DELETE = range(4)
+MAIN_MENU, ADD_INFO, DELETE_INFO, SEARCH_INFO, CONFIRM_ACTION = range(5)
 
 # ========== БАЗА ДАННЫХ ==========
 def init_db():
@@ -49,7 +47,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS info (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
-            username TEXT,
+            username TEXT NOT NULL,
             info_text TEXT NOT NULL,
             added_by INTEGER NOT NULL,
             added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -62,34 +60,15 @@ def init_db():
     conn.commit()
     conn.close()
 
-def cleanup_old_backups():
-    """Очистка старых резервных копий (оставляет только последние 10)."""
-    try:
-        if not os.path.exists(BACKUP_DIR):
-            os.makedirs(BACKUP_DIR)
-            
-        backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.startswith('info.db.backup_')])
-        
-        if len(backups) > 10:
-            for old_backup in backups[:-10]:
-                os.remove(os.path.join(BACKUP_DIR, old_backup))
-                logger.info(f"Удален старый бэкап: {old_backup}")
-    except Exception as e:
-        logger.error(f"Ошибка при очистке бэкапов: {e}")
-
 def cleanup_database():
-    """Очистка базы данных от старых записей (старше 30 дней)."""
+    """Очистка базы данных от старых записей."""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        
         cursor.execute("DELETE FROM info WHERE added_date < datetime('now', '-30 days')")
         deleted_count = cursor.rowcount
-        
         conn.commit()
         conn.close()
-        
-        logger.info(f"Очистка базы данных завершена. Очищено записей: {deleted_count}")
         return deleted_count
     except Exception as e:
         logger.error(f"Ошибка при очистке БД: {e}")
@@ -100,95 +79,57 @@ def backup_database():
     try:
         if not os.path.exists(BACKUP_DIR):
             os.makedirs(BACKUP_DIR)
-            
         timestamp = int(datetime.now().timestamp())
-        backup_file = os.path.join(BACKUP_DIR, f"info.db.backup_{timestamp}")
+        backup_file = f"{BACKUP_DIR}/info.db.backup_{timestamp}"
         shutil.copy2(DB_FILE, backup_file)
-        
-        logger.info(f"Создана резервная копия: info.db.backup_{timestamp}")
-        return f"info.db.backup_{timestamp}"
+        return backup_file
     except Exception as e:
         logger.error(f"Ошибка при создании бэкапа: {e}")
         return None
 
-def import_database_from_file(file_path: str) -> int:
-    """Импорт базы данных из файла."""
-    try:
-        # Создаем резервную копию текущей БД
-        backup_name = backup_database()
-        
-        import sqlite3
-        conn = sqlite3.connect(DB_FILE)
-        conn.close()
-        
-        shutil.copy2(file_path, DB_FILE)
-        
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM info")
-        count = cursor.fetchone()[0]
-        conn.close()
-        
-        logger.info(f"База данных импортирована. Записей: {count}")
-        return count
-    except Exception as e:
-        logger.error(f"Ошибка при импорте БД: {e}")
-        
-        if backup_name and os.path.exists(os.path.join(BACKUP_DIR, backup_name)):
-            shutil.copy2(os.path.join(BACKUP_DIR, backup_name), DB_FILE)
-            logger.info(f"Восстановлен из бэкапа: {backup_name}")
-        
-        raise e
-
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def is_owner(user_id: int) -> bool:
     """Проверяет, является ли пользователь владельцем."""
-    return str(user_id) in ADMIN_IDS
+    return user_id in ADMIN_IDS
 
-def get_user_info(username: str) -> List[Dict]:
-    """Получение информации о пользователе."""
+def get_all_users():
+    """Получает список всех пользователей."""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        
-        username_clean = username.lstrip('@').lower()
-        
-        cursor.execute('''
-            SELECT username, info_text, added_date 
-            FROM info 
-            WHERE LOWER(username) = ? 
-            ORDER BY added_date DESC
-        ''', (username_clean,))
-        
-        results = cursor.fetchall()
+        cursor.execute("SELECT DISTINCT username FROM info ORDER BY username")
+        users = [row[0] for row in cursor.fetchall()]
         conn.close()
-        
-        return [
-            {
-                'username': row[0],
-                'info_text': row[1],
-                'added_date': row[2]
-            }
-            for row in results
-        ]
+        return users
+    except Exception as e:
+        logger.error(f"Ошибка при получении пользователей: {e}")
+        return []
+
+def get_user_info(username: str):
+    """Получает информацию о пользователе."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT info_text, added_date FROM info WHERE username = ? ORDER BY added_date DESC",
+            (username,)
+        )
+        info = cursor.fetchall()
+        conn.close()
+        return info
     except Exception as e:
         logger.error(f"Ошибка при получении информации: {e}")
         return []
 
-def add_user_info(username: str, info_text: str, added_by: int) -> bool:
-    """Добавление информации о пользователе."""
+def add_user_info(username: str, info_text: str, added_by: int):
+    """Добавляет информацию о пользователе."""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        
-        user_id = 0
-        username_clean = username.lstrip('@')
-        
-        cursor.execute('''
-            INSERT INTO info (user_id, username, info_text, added_by)
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, username_clean, info_text, added_by))
-        
+        cursor.execute(
+            "INSERT INTO info (user_id, username, info_text, added_by) VALUES (0, ?, ?, ?)",
+            (username, info_text, added_by)
+        )
         conn.commit()
         conn.close()
         return True
@@ -196,273 +137,442 @@ def add_user_info(username: str, info_text: str, added_by: int) -> bool:
         logger.error(f"Ошибка при добавлении информации: {e}")
         return False
 
-def delete_user_info(username: str) -> bool:
-    """Удаление информации о пользователе."""
+def delete_user_info(username: str):
+    """Удаляет информацию о пользователе."""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        
-        username_clean = username.lstrip('@').lower()
-        
-        cursor.execute('DELETE FROM info WHERE LOWER(username) = ?', (username_clean,))
+        cursor.execute("DELETE FROM info WHERE username = ?", (username,))
         deleted_count = cursor.rowcount
-        
         conn.commit()
         conn.close()
-        
-        logger.info(f"Удалено записей для {username}: {deleted_count}")
         return deleted_count > 0
     except Exception as e:
         logger.error(f"Ошибка при удалении информации: {e}")
         return False
 
-def get_all_info() -> List[Dict]:
-    """Получение всей информации из базы."""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT username, info_text, added_date 
-            FROM info 
-            ORDER BY username, added_date DESC
-        ''')
-        
-        results = cursor.fetchall()
-        conn.close()
-        
-        return [
-            {
-                'username': row[0],
-                'info_text': row[1],
-                'added_date': row[2]
-            }
-            for row in results
-        ]
-    except Exception as e:
-        logger.error(f"Ошибка при получении всей информации: {e}")
-        return []
+# ========== КЛАВИАТУРЫ ==========
+def get_main_menu_keyboard():
+    """Клавиатура главного меню."""
+    keyboard = [
+        [InlineKeyboardButton("📝 Добавить информацию", callback_data='add_info')],
+        [InlineKeyboardButton("🗑️ Удалить информацию", callback_data='delete_info')],
+        [InlineKeyboardButton("🔍 Найти информацию", callback_data='search_info')],
+        [InlineKeyboardButton("📋 Весь список", callback_data='all_info')],
+        [InlineKeyboardButton("⚙️ Управление БД", callback_data='db_management')]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_db_management_keyboard():
+    """Клавиатура управления БД (только для владельца)."""
+    keyboard = [
+        [InlineKeyboardButton("💾 Создать бэкап", callback_data='create_backup')],
+        [InlineKeyboardButton("🔄 Импорт БД", callback_data='import_db')],
+        [InlineKeyboardButton("📊 Статистика", callback_data='stats')],
+        [InlineKeyboardButton("🧹 Очистка", callback_data='cleanup')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_back_keyboard():
+    """Кнопка возврата."""
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]]
+    return InlineKeyboardMarkup(keyboard)
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start."""
     await update.message.reply_text(
-        "👋 Привет! Я бот для хранения информации о пользователях.\n\n"
-        "📋 Основные команды:\n"
-        "/help - Справка по командам\n"
-        "/tops - Весь список информации\n\n"
-        "📝 Для работы в группах:\n"
-        "+инфо @ник текст - добавить информацию\n"
-        "-инфо @ник - удалить информацию\n"
-        "!инфо @ник - узнать информацию\n\n"
-        "🛠️ Для импорта БД: отправьте файл info.db в чат с ботом"
+        "🎮 *Информационный Бот*\n\n"
+        "✨ *Возможности:*\n"
+        "• 📝 Добавление информации о пользователях\n"
+        "• 🔍 Поиск и просмотр информации\n"
+        "• 🗑️ Управление записями\n"
+        "• 💾 Резервное копирование (для владельца)\n\n"
+        "👇 Используйте кнопки ниже для навигации:",
+        parse_mode='Markdown',
+        reply_markup=get_main_menu_keyboard()
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /help."""
     help_text = (
-        "📖 **Справка по командам:**\n\n"
-        "👑 **Команды для владельцев:**\n"
-        "/stats - Статистика базы данных\n"
-        "/backup - Создать резервную копию БД\n"
-        "/cleanup - Очистить старые записи\n\n"
-        "👥 **Команды для всех:**\n"
-        "/start - Начало работы\n"
-        "/help - Эта справка\n"
-        "/tops - Показать всю информацию\n"
-        "!инфо @ник - Найти информацию о пользователе\n\n"
-        "📝 **Работа в группах:**\n"
-        "+инфо @ник текст - добавить информацию\n"
-        "-инфо @ник - удалить информацию\n\n"
-        "💾 **Импорт БД (только для владельца):**\n"
-        "Отправьте файл info.db в чат для импорта\n"
-        "/backup - получить резервную копию БД"
+        "🎮 *Информационный Бот - Справка*\n\n"
+        "✨ *Основные команды:*\n"
+        "`/start` - Запустить бота\n"
+        "`/help` - Эта справка\n"
+        "`/tops` - Весь список информации\n\n"
+        "📝 *Работа с информацией:*\n"
+        "`!инфо @username` - Найти информацию\n"
+        "`+инфо @username текст` - Добавить информацию\n"
+        "`-инфо @username` - Удалить информацию\n\n"
+        "⚙️ *Управление БД (владелец):*\n"
+        "`/stats` - Статистика\n"
+        "`/backup` - Создать бэкап\n"
+        "`/cleanup` - Очистка\n\n"
+        "💾 *Импорт БД:*\n"
+        "Отправьте файл `info.db` в чат"
     )
-    
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
-async def tops_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /tops - показывает всю информацию."""
-    try:
-        logger.info(f"Получена команда /tops от пользователя {update.effective_user.id}")
-        
-        all_info = get_all_info()
-        
-        if not all_info:
-            await update.message.reply_text("📭 База данных пуста.")
-            return
-        
-        grouped_info = {}
-        for item in all_info:
-            username = item['username']
-            if username not in grouped_info:
-                grouped_info[username] = []
-            grouped_info[username].append(item)
-        
-        message_parts = []
-        for username, items in grouped_info.items():
-            message_parts.append(f"👤 **@{username}**")
-            for i, item in enumerate(items, 1):
-                date_str = datetime.strptime(item['added_date'], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')
-                message_parts.append(f"  {i}. {item['info_text']} ({date_str})")
-            message_parts.append("")
-        
-        full_message = "\n".join(message_parts)
-        max_length = 4000
-        
-        if len(full_message) > max_length:
-            parts = []
-            current_part = ""
-            
-            for line in message_parts:
-                if len(current_part) + len(line) + 1 > max_length:
-                    parts.append(current_part)
-                    current_part = line + "\n"
-                else:
-                    current_part += line + "\n"
-            
-            if current_part:
-                parts.append(current_part)
-            
-            for i, part in enumerate(parts, 1):
-                if i == 1:
-                    await update.message.reply_text(f"📋 Вся информация (часть {i}/{len(parts)}):\n\n{part}", parse_mode='Markdown')
-                else:
-                    await update.message.reply_text(f"📋 (часть {i}/{len(parts)})\n\n{part}", parse_mode='Markdown')
-        else:
-            await update.message.reply_text(f"📋 Вся информация:\n\n{full_message}", parse_mode='Markdown')
-            
-    except Exception as e:
-        logger.error(f"Ошибка в /tops: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при получении информации.")
+async def tops_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /tops."""
+    await show_all_info(update, context)
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /stats - статистика базы данных."""
+# ========== ОБРАБОТЧИКИ CALLBACK ==========
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик нажатий на кнопки."""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    
+    if data == 'add_info':
+        await query.edit_message_text(
+            "📝 *Добавление информации*\n\n"
+            "Отправьте сообщение в формате:\n"
+            "`+инфо @username текст информации`\n\n"
+            "Пример:\n"
+            "`+инфо @ivanov любит котиков`",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard()
+        )
+    
+    elif data == 'delete_info':
+        await query.edit_message_text(
+            "🗑️ *Удаление информации*\n\n"
+            "Отправьте сообщение в формате:\n"
+            "`-инфо @username`\n\n"
+            "Пример:\n"
+            "`-инфо @ivanov`",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard()
+        )
+    
+    elif data == 'search_info':
+        await query.edit_message_text(
+            "🔍 *Поиск информации*\n\n"
+            "Отправьте сообщение в формате:\n"
+            "`!инфо @username`\n\n"
+            "Пример:\n"
+            "`!инфо @ivanov`",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard()
+        )
+    
+    elif data == 'all_info':
+        await show_all_info_callback(query, context)
+    
+    elif data == 'db_management':
+        user_id = query.from_user.id
+        if is_owner(user_id):
+            await query.edit_message_text(
+                "⚙️ *Управление базой данных*\n\n"
+                "Выберите действие:",
+                parse_mode='Markdown',
+                reply_markup=get_db_management_keyboard()
+            )
+        else:
+            await query.edit_message_text(
+                "⛔ *Доступ запрещен*\n\n"
+                "Эта функция доступна только владельцу бота.",
+                parse_mode='Markdown',
+                reply_markup=get_back_keyboard()
+            )
+    
+    elif data == 'create_backup':
+        await create_backup_callback(query, context)
+    
+    elif data == 'import_db':
+        await query.edit_message_text(
+            "🔄 *Импорт базы данных*\n\n"
+            "Отправьте файл `info.db` в этот чат.\n"
+            "⚠️ *Внимание:* Текущая БД будет заменена!",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard()
+        )
+    
+    elif data == 'stats':
+        await stats_callback(query, context)
+    
+    elif data == 'cleanup':
+        await cleanup_callback(query, context)
+    
+    elif data == 'back_to_main':
+        await query.edit_message_text(
+            "🎮 *Главное меню*\n\n"
+            "Выберите действие:",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+
+async def show_all_info_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает всю информацию (через callback)."""
+    users = get_all_users()
+    
+    if not users:
+        await query.edit_message_text(
+            "📭 *База данных пуста*\n\n"
+            "Добавьте информацию с помощью кнопки ниже:",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+    
+    # Формируем сообщение с пагинацией
+    context.user_data['all_users'] = users
+    context.user_data['current_page'] = 0
+    
+    await show_page(query, context)
+
+async def show_page(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает страницу со списком пользователей."""
+    users = context.user_data['all_users']
+    current_page = context.user_data['current_page']
+    items_per_page = 10
+    
+    total_pages = (len(users) + items_per_page - 1) // items_per_page
+    start_idx = current_page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(users))
+    
+    message = f"📋 *Весь список информации*\n"
+    message += f"Страница {current_page + 1} из {total_pages}\n\n"
+    
+    for i in range(start_idx, end_idx):
+        username = users[i]
+        info_list = get_user_info(username)
+        if info_list:
+            message += f"👤 *@{username}*\n"
+            for j, (text, date) in enumerate(info_list[:3], 1):
+                date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')
+                message += f"  {j}. {text} ({date_str})\n"
+            message += "\n"
+    
+    # Создаем кнопки пагинации
+    keyboard = []
+    if current_page > 0:
+        keyboard.append(InlineKeyboardButton("⬅️ Назад", callback_data=f'page_{current_page-1}'))
+    if current_page < total_pages - 1:
+        keyboard.append(InlineKeyboardButton("Вперед ➡️", callback_data=f'page_{current_page+1}'))
+    
+    if keyboard:
+        reply_markup = InlineKeyboardMarkup([keyboard, [InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]])
+    else:
+        reply_markup = get_back_keyboard()
+    
+    await query.edit_message_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def page_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик переключения страниц."""
+    query = update.callback_query
+    await query.answer()
+    
+    page_num = int(query.data.split('_')[1])
+    context.user_data['current_page'] = page_num
+    
+    await show_page(query, context)
+
+async def create_backup_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
+    """Создает резервную копию БД."""
+    user_id = query.from_user.id
+    if not is_owner(user_id):
+        await query.edit_message_text(
+            "⛔ *Доступ запрещен*",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard()
+        )
+        return
+    
+    backup_path = backup_database()
+    if backup_path:
+        with open(backup_path, 'rb') as f:
+            await query.message.reply_document(
+                document=f,
+                filename=os.path.basename(backup_path),
+                caption="💾 *Резервная копия создана!*",
+                parse_mode='Markdown'
+            )
+        await query.edit_message_text(
+            "✅ *Резервная копия успешно создана и отправлена!*",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard()
+        )
+    else:
+        await query.edit_message_text(
+            "❌ *Не удалось создать резервную копию*",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard()
+        )
+
+async def stats_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает статистику БД."""
+    user_id = query.from_user.id
+    if not is_owner(user_id):
+        await query.edit_message_text(
+            "⛔ *Доступ запрещен*",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard()
+        )
+        return
+    
     try:
-        user_id = update.effective_user.id
-        if not is_owner(user_id):
-            await update.message.reply_text("❌ Эта команда доступна только владельцу бота.")
-            return
-        
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         
         cursor.execute("SELECT COUNT(*) FROM info")
-        total_count = cursor.fetchone()[0]
+        total = cursor.fetchone()[0]
         
         cursor.execute("SELECT COUNT(DISTINCT username) FROM info")
         unique_users = cursor.fetchone()[0]
         
         cursor.execute("SELECT MIN(added_date), MAX(added_date) FROM info")
-        date_range = cursor.fetchone()
+        dates = cursor.fetchone()
+        
+        cursor.execute("SELECT added_by, COUNT(*) FROM info GROUP BY added_by ORDER BY COUNT(*) DESC LIMIT 5")
+        top_adders = cursor.fetchall()
         
         conn.close()
         
-        message = f"📊 **Статистика базы данных:**\n\n"
-        message += f"• Всего записей: {total_count}\n"
-        message += f"• Уникальных пользователей: {unique_users}\n"
+        message = "📊 *Статистика базы данных*\n\n"
+        message += f"• Всего записей: `{total}`\n"
+        message += f"• Уникальных пользователей: `{unique_users}`\n"
         
-        if date_range[0] and date_range[1]:
-            first_date = datetime.strptime(date_range[0], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')
-            last_date = datetime.strptime(date_range[1], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')
-            message += f"• Период данных: с {first_date} по {last_date}\n"
+        if dates[0] and dates[1]:
+            min_date = datetime.strptime(dates[0], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')
+            max_date = datetime.strptime(dates[1], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')
+            message += f"• Период: `{min_date}` - `{max_date}`\n"
         
-        if os.path.exists(BACKUP_DIR):
-            backups = os.listdir(BACKUP_DIR)
-            message += f"\n💾 **Резервные копии:** {len(backups)} файлов\n"
+        if top_adders:
+            message += "\n🏆 *Топ-5 по добавлению:*\n"
+            for user_id, count in top_adders:
+                message += f"  👤 {user_id}: `{count}` записей\n"
         
-        await update.message.reply_text(message, parse_mode='Markdown')
+        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=get_back_keyboard())
         
     except Exception as e:
-        logger.error(f"Ошибка в /stats: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при получении статистики.")
-
-async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /backup - создает и отправляет резервную копию."""
-    try:
-        user_id = update.effective_user.id
-        if not is_owner(user_id):
-            await update.message.reply_text("❌ Эта команда доступна только владельцу бота.")
-            return
-        
-        backup_name = backup_database()
-        
-        if backup_name:
-            backup_path = os.path.join(BACKUP_DIR, backup_name)
-            
-            with open(backup_path, 'rb') as f:
-                await update.message.reply_document(
-                    document=f,
-                    filename=backup_name,
-                    caption=f"💾 Резервная копия создана: {backup_name}"
-                )
-        else:
-            await update.message.reply_text("❌ Не удалось создать резервную копию.")
-            
-    except Exception as e:
-        logger.error(f"Ошибка в /backup: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при создании резервной копии.")
-
-async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /cleanup - очистка старых записей."""
-    try:
-        user_id = update.effective_user.id
-        if not is_owner(user_id):
-            await update.message.reply_text("❌ Эта команда доступна только владельцу бота.")
-            return
-        
-        deleted_count = cleanup_database()
-        cleanup_old_backups()
-        
-        await update.message.reply_text(
-            f"🧹 Очистка завершена!\n"
-            f"• Удалено записей: {deleted_count}\n"
-            f"• Очищены старые резервные копии"
+        logger.error(f"Ошибка статистики: {e}")
+        await query.edit_message_text(
+            "❌ *Ошибка при получении статистики*",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard()
         )
-        
-    except Exception as e:
-        logger.error(f"Ошибка в /cleanup: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при очистке.")
+
+async def cleanup_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
+    """Очищает старые записи."""
+    user_id = query.from_user.id
+    if not is_owner(user_id):
+        await query.edit_message_text(
+            "⛔ *Доступ запрещен*",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard()
+        )
+        return
+    
+    deleted_count = cleanup_database()
+    await query.edit_message_text(
+        f"🧹 *Очистка завершена!*\n\n"
+        f"Удалено записей старше 30 дней: `{deleted_count}`",
+        parse_mode='Markdown',
+        reply_markup=get_back_keyboard()
+    )
 
 # ========== ОБРАБОТЧИКИ СООБЩЕНИЙ ==========
-async def handle_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды !инфо @ник."""
+async def show_all_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает всю информацию."""
+    users = get_all_users()
+    
+    if not users:
+        await update.message.reply_text(
+            "📭 *База данных пуста*",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Отправляем первое сообщение с кнопками
+    context.user_data['all_users'] = users
+    context.user_data['current_page'] = 0
+    
+    await show_page_message(update, context)
+
+async def show_page_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает страницу в сообщении."""
+    users = context.user_data.get('all_users', [])
+    current_page = context.user_data.get('current_page', 0)
+    items_per_page = 10
+    
+    total_pages = (len(users) + items_per_page - 1) // items_per_page
+    start_idx = current_page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(users))
+    
+    message = f"📋 *Весь список информации*\n"
+    message += f"Страница {current_page + 1} из {total_pages}\n\n"
+    
+    for i in range(start_idx, end_idx):
+        username = users[i]
+        info_list = get_user_info(username)
+        if info_list:
+            message += f"👤 *@{username}*\n"
+            for j, (text, date) in enumerate(info_list[:3], 1):
+                date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')
+                message += f"  {j}. {text} ({date_str})\n"
+            message += "\n"
+    
+    # Создаем кнопки пагинации
+    keyboard = []
+    if current_page > 0:
+        keyboard.append(InlineKeyboardButton("⬅️ Назад", callback_data=f'page_{current_page-1}'))
+    if current_page < total_pages - 1:
+        keyboard.append(InlineKeyboardButton("Вперед ➡️", callback_data=f'page_{current_page+1}'))
+    
+    reply_markup = InlineKeyboardMarkup([keyboard]) if keyboard else None
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def handle_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик !инфо @ник."""
     try:
         text = update.message.text.strip()
         
         if not text.startswith('!инфо '):
             return
         
-        parts = text.split(' ', 2)
+        parts = text.split(' ', 1)
         if len(parts) < 2:
-            await update.message.reply_text("❌ Формат: !инфо @никнейм")
+            await update.message.reply_text("❌ Формат: `!инфо @username`", parse_mode='Markdown')
             return
         
-        username = parts[1]
+        username = parts[1].strip().lstrip('@')
+        if not username:
+            await update.message.reply_text("❌ Укажите username после @", parse_mode='Markdown')
+            return
         
         info_list = get_user_info(username)
         
         if not info_list:
-            await update.message.reply_text(f"ℹ️ Информация о @{username.lstrip('@')} не найдена.")
+            await update.message.reply_text(
+                f"ℹ️ Информация о @{username} не найдена.",
+                parse_mode='Markdown'
+            )
             return
         
-        response = f"📋 Информация о @{username.lstrip('@')}:\n\n"
+        response = f"📋 *Информация о @{username}:*\n\n"
         
-        for i, info in enumerate(info_list, 1):
-            date_str = datetime.strptime(info['added_date'], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
-            response += f"{i}. {info['info_text']}\n   📅 {date_str}\n\n"
+        for i, (text, date) in enumerate(info_list, 1):
+            date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+            response += f"{i}. {text}\n   📅 {date_str}\n\n"
         
-        await update.message.reply_text(response)
+        await update.message.reply_text(response, parse_mode='Markdown')
         
     except Exception as e:
-        logger.error(f"Ошибка в handle_info_command: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при поиске информации.")
+        logger.error(f"Ошибка поиска: {e}")
+        await update.message.reply_text("❌ Ошибка при поиске информации")
 
-async def handle_add_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды +инфо @ник текст."""
+async def handle_add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик +инфо @ник текст."""
     try:
-        user_id = update.effective_user.id
-        
         text = update.message.text.strip()
         
         if not text.startswith('+инфо '):
@@ -470,32 +580,33 @@ async def handle_add_info(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
         parts = text.split(' ', 2)
         if len(parts) < 3:
-            await update.message.reply_text("❌ Формат: +инфо @никнейм текст_информации")
+            await update.message.reply_text("❌ Формат: `+инфо @username текст`", parse_mode='Markdown')
             return
         
-        username = parts[1]
-        info_text = parts[2]
+        username = parts[1].strip().lstrip('@')
+        info_text = parts[2].strip()
         
-        if not username.startswith('@'):
-            await update.message.reply_text("❌ Укажите username с @ (например: @username)")
+        if not username or not info_text:
+            await update.message.reply_text("❌ Укажите username и текст", parse_mode='Markdown')
             return
         
-        success = add_user_info(username, info_text, user_id)
+        success = add_user_info(username, info_text, update.effective_user.id)
         
         if success:
-            await update.message.reply_text(f"✅ Информация о @{username.lstrip('@')} успешно добавлена!")
+            await update.message.reply_text(
+                f"✅ Информация о @{username} успешно добавлена!",
+                parse_mode='Markdown'
+            )
         else:
-            await update.message.reply_text("❌ Не удалось добавить информацию.")
+            await update.message.reply_text("❌ Не удалось добавить информацию")
             
     except Exception as e:
-        logger.error(f"Ошибка в handle_add_info: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при добавлении информации.")
+        logger.error(f"Ошибка добавления: {e}")
+        await update.message.reply_text("❌ Ошибка при добавлении информации")
 
-async def handle_delete_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды -инфо @ник."""
+async def handle_delete_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик -инфо @ник."""
     try:
-        user_id = update.effective_user.id
-        
         text = update.message.text.strip()
         
         if not text.startswith('-инфо '):
@@ -503,99 +614,137 @@ async def handle_delete_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         parts = text.split(' ', 1)
         if len(parts) < 2:
-            await update.message.reply_text("❌ Формат: -инфо @никнейм")
+            await update.message.reply_text("❌ Формат: `-инфо @username`", parse_mode='Markdown')
             return
         
-        username = parts[1]
-        
-        if not username.startswith('@'):
-            await update.message.reply_text("❌ Укажите username с @ (например: @username)")
+        username = parts[1].strip().lstrip('@')
+        if not username:
+            await update.message.reply_text("❌ Укажите username после @", parse_mode='Markdown')
             return
         
         success = delete_user_info(username)
         
         if success:
-            await update.message.reply_text(f"✅ Информация о @{username.lstrip('@')} успешно удалена!")
+            await update.message.reply_text(
+                f"✅ Информация о @{username} успешно удалена!",
+                parse_mode='Markdown'
+            )
         else:
-            await update.message.reply_text(f"ℹ️ Информация о @{username.lstrip('@')} не найдена.")
+            await update.message.reply_text(
+                f"ℹ️ Информация о @{username} не найдена.",
+                parse_mode='Markdown'
+            )
             
     except Exception as e:
-        logger.error(f"Ошибка в handle_delete_info: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при удалении информации.")
+        logger.error(f"Ошибка удаления: {e}")
+        await update.message.reply_text("❌ Ошибка при удалении информации")
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик получения документов (только для владельца)."""
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик документов (импорт БД)."""
     try:
         user_id = update.effective_user.id
         
-        # ВАЖНО: проверяем ТОЛЬКО если это владелец (6893832048)
+        # Проверяем владельца
         if not is_owner(user_id):
-            # Игнорируем документы от всех остальных пользователей
+            # Игнорируем документы от не-владельцев
             return
         
         document = update.message.document
         
-        # Проверяем, что это файл базы данных
-        if document.file_name != "info.db":
-            await update.message.reply_text("❌ Пожалуйста, отправьте файл с именем 'info.db'")
+        # Проверяем, что это файл БД
+        if not document.file_name or not document.file_name.endswith('.db'):
+            await update.message.reply_text(
+                "❌ *Неверный формат файла*\n\n"
+                "Отправьте файл базы данных с расширением `.db`",
+                parse_mode='Markdown'
+            )
             return
         
-        file = await document.get_file()
+        # Скачиваем файл
+        temp_file = await document.get_file()
         temp_path = f"temp_{document.file_name}"
-        await file.download_to_drive(temp_path)
+        await temp_file.download_to_drive(temp_path)
         
-        progress_msg = await update.message.reply_text("🔄 Начинаю импорт базы данных...")
-        
+        # Проверяем структуру файла
         try:
-            imported_count = import_database_from_file(temp_path)
-            os.remove(temp_path)
-            
-            await progress_msg.edit_text(
-                f"✅ База данных успешно импортирована!\n"
-                f"• Загружено записей: {imported_count}\n"
-                f"• Создана резервная копия предыдущей версии"
-            )
-            
+            test_conn = sqlite3.connect(temp_path)
+            test_cursor = test_conn.cursor()
+            test_cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='info'")
+            if not test_cursor.fetchone():
+                raise Exception("Таблица 'info' не найдена в файле")
+            test_conn.close()
         except Exception as e:
-            await progress_msg.edit_text(f"❌ Ошибка при импорте: {str(e)[:200]}")
-            logger.error(f"Ошибка импорта: {e}")
-            
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-                
+            os.remove(temp_path)
+            await update.message.reply_text(
+                f"❌ *Неверная структура БД*\n\n"
+                f"Ошибка: {str(e)}",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Создаем бэкап текущей БД
+        backup_path = backup_database()
+        
+        # Заменяем текущую БД
+        shutil.copy2(temp_path, DB_FILE)
+        os.remove(temp_path)
+        
+        # Получаем статистику импортированной БД
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM info")
+        count = cursor.fetchone()[0]
+        conn.close()
+        
+        await update.message.reply_text(
+            f"✅ *База данных успешно импортирована!*\n\n"
+            f"• Записей в БД: `{count}`\n"
+            f"• Создан бэкап: `{os.path.basename(backup_path) if backup_path else 'нет'}`",
+            parse_mode='Markdown'
+        )
+        
     except Exception as e:
-        logger.error(f"Ошибка в handle_document: {e}")
+        logger.error(f"Ошибка импорта: {e}")
+        await update.message.reply_text(
+            f"❌ *Ошибка импорта БД*\n\n"
+            f"Ошибка: {str(e)[:200]}",
+            parse_mode='Markdown'
+        )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обрабатывает текстовые сообщения."""
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик текстовых сообщений."""
     try:
         if not update.message or not update.message.text:
             return
         
         text = update.message.text
         
+        # Обрабатываем команды
         if text.startswith('!инфо '):
             await handle_info_command(update, context)
         elif text.startswith('+инфо '):
             await handle_add_info(update, context)
         elif text.startswith('-инфо '):
             await handle_delete_info(update, context)
+        elif text.lower() in ['меню', 'menu', 'start', 'начать']:
+            await update.message.reply_text(
+                "🎮 *Главное меню*\n\n"
+                "Выберите действие:",
+                parse_mode='Markdown',
+                reply_markup=get_main_menu_keyboard()
+            )
             
     except Exception as e:
-        logger.error(f"Ошибка в handle_message: {e}")
+        logger.error(f"Ошибка обработки сообщения: {e}")
 
 # ========== ОСНОВНАЯ ФУНКЦИЯ ==========
 def main():
     """Основная функция запуска бота."""
-    # Инициализация базы данных
+    # Инициализация БД
     init_db()
     
-    # Очистка старых записей при запуске
-    cleaned_count = cleanup_database()
-    cleanup_old_backups()
-    
-    # Загружаем администраторов
-    logger.info(f"Загружены администраторы: {ADMIN_IDS}")
+    # Очистка старых записей
+    cleaned = cleanup_database()
     
     # Создаем приложение
     application = Application.builder().token(TOKEN).build()
@@ -604,39 +753,29 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("tops", tops_command))
-    application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("backup", backup_command))
-    application.add_handler(CommandHandler("cleanup", cleanup_command))
     
-    # Добавляем обработчики сообщений
+    # Обработчики сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    # ВАЖНО: обработчик документов ТОЛЬКО для владельца
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
-    # Планировщик для автоматической очистки
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(cleanup_database, 'interval', days=1)
-    scheduler.add_job(cleanup_old_backups, 'interval', days=1)
-    scheduler.start()
+    # Обработчики кнопок
+    application.add_handler(CallbackQueryHandler(button_handler, pattern='^(add_info|delete_info|search_info|all_info|db_management|create_backup|import_db|stats|cleanup|back_to_main)$'))
+    application.add_handler(CallbackQueryHandler(page_handler, pattern='^page_'))
     
     # Запуск бота
     print("=" * 50)
-    print("🤖 Бот запущен...")
+    print("🎮 ИНФОРМАЦИОННЫЙ БОТ ЗАПУЩЕН")
     print("=" * 50)
-    print(f" Главный владелец: {ADMIN_IDS[0]}")
-    print(f"🧹 Очищено записей в БД: {cleaned_count}")
-    print()
+    print(f" Владелец: {ADMIN_IDS[0]}")
+    print(f"🧹 Очищено записей: {cleaned}")
+    print("=" * 50)
     print("📋 Основные команды:")
-    print("/help - Справка по командам")
-    print("/tops - Весь список информации (доступно всем)")
-    print("+инфо @ник текст - добавить информацию")
-    print("-инфо @ник - удалить информацию")
-    print("!инфо @ник - узнать информацию")
-    print()
-    print("🛠️ Для импорта БД: отправьте файл info.db в чат с ботом")
-    print("   (только для владельца бота)")
-    print("📝 Логи сохраняются в файл bot.log")
+    print("• /start - Запустить бот")
+    print("• /help - Справка")
+    print("• /tops - Весь список")
+    print("• +инфо @ник текст - Добавить")
+    print("• -инфо @ник - Удалить")
+    print("• !инфо @ник - Найти")
     print("=" * 50)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
