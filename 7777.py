@@ -2,10 +2,9 @@ import logging
 import sqlite3
 import os
 import shutil
-import json
 from datetime import datetime
-from typing import Dict, List, Optional
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
+from typing import Dict, List
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from telegram.ext import (
     Application, 
     CommandHandler, 
@@ -33,9 +32,6 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-
-# Состояния для ConversationHandler
-MAIN_MENU, ADD_INFO, DELETE_INFO, SEARCH_INFO, CONFIRM_ACTION = range(5)
 
 # ========== БАЗА ДАННЫХ ==========
 def init_db():
