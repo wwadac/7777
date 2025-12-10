@@ -14,6 +14,7 @@ from telegram.ext import (
     ContextTypes, 
     filters
 )
+from telegram.error import BadRequest
 
 # ========== КОНФИГУРАЦИЯ ==========
 TOKEN = "8534057742:AAFfm2gswdz-b6STcrWcCdRfaToRDkPUu0A"
@@ -64,13 +65,11 @@ def init_db():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_username ON info(username)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON info(user_id)')
     
-    # Добавляем владельца в таблицу админов, если его там нет
-    cursor.execute('SELECT 1 FROM admins WHERE user_id = ?', (OWNER_ID,))
-    if not cursor.fetchone():
-        cursor.execute(
-            'INSERT OR IGNORE INTO admins (user_id, username, added_by) VALUES (?, ?, ?)',
-            (OWNER_ID, 'owner', OWNER_ID)
-        )
+    # Добавляем владельца в таблицу админов
+    cursor.execute(
+        'INSERT OR IGNORE INTO admins (user_id, username, added_by) VALUES (?, ?, ?)',
+        (OWNER_ID, 'owner', OWNER_ID)
+    )
     
     conn.commit()
     conn.close()
@@ -121,10 +120,9 @@ def is_admin(user_id: int) -> bool:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         
-        # Проверяем существование таблицы admins
+        # Сначала проверяем существование таблицы admins
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='admins'")
-        if not cursor.fetchone():
-            # Таблицы нет, значит админов кроме владельца нет
+        if cursor.fetchone() is None:
             conn.close()
             return False
             
@@ -134,7 +132,6 @@ def is_admin(user_id: int) -> bool:
         return result
     except Exception as e:
         logger.error(f"Ошибка при проверке админа: {e}")
-        # В случае ошибки считаем, что пользователь не админ
         return False
 
 def get_all_admins():
@@ -142,6 +139,13 @@ def get_all_admins():
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
+        
+        # Проверяем существование таблицы admins
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='admins'")
+        if cursor.fetchone() is None:
+            conn.close()
+            return []
+            
         cursor.execute('SELECT user_id, username FROM admins ORDER BY added_date')
         admins = cursor.fetchall()
         conn.close()
@@ -150,14 +154,25 @@ def get_all_admins():
         logger.error(f"Ошибка при получении админов: {e}")
         return []
 
-def add_admin(user_id: int, username: str, added_by: int) -> bool:
-    """Добавляет админа."""
+def add_admin_by_id(user_id: int, added_by: int) -> bool:
+    """Добавляет админа по user_id."""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
+        
+        # Создаем таблицу, если ее нет
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                added_by INTEGER,
+                added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
         cursor.execute(
-            'INSERT OR REPLACE INTO admins (user_id, username, added_by) VALUES (?, ?, ?)',
-            (user_id, username, added_by)
+            'INSERT OR REPLACE INTO admins (user_id, added_by) VALUES (?, ?)',
+            (user_id, added_by)
         )
         conn.commit()
         conn.close()
@@ -353,8 +368,8 @@ def get_management_keyboard(user_id: int):
 def get_admins_management_keyboard():
     """Клавиатура управления админами (только для владельца)."""
     keyboard = [
-        [InlineKeyboardButton("➕ Добавить админа", callback_data='add_admin')],
-        [InlineKeyboardButton("➖ Удалить админа", callback_data='remove_admin')],
+        [InlineKeyboardButton("➕ Добавить админа по ID", callback_data='add_admin_by_id')],
+        [InlineKeyboardButton("➖ Удалить админа по ID", callback_data='remove_admin_by_id')],
         [InlineKeyboardButton("📋 Список админов", callback_data='list_admins')],
         [InlineKeyboardButton("🔙 Назад", callback_data='back_to_management')]
     ]
@@ -366,6 +381,15 @@ def get_back_keyboard(chat_type: str):
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]]
         return InlineKeyboardMarkup(keyboard)
     return None
+
+# ========== БЕЗОПАСНОЕ РЕДАКТИРОВАНИЕ СООБЩЕНИЙ ==========
+async def safe_edit_message_text(query: CallbackQuery, text: str, parse_mode: str = None, reply_markup: InlineKeyboardMarkup = None):
+    """Безопасное редактирование сообщения с обработкой ошибок."""
+    try:
+        await query.edit_message_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            raise
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -392,7 +416,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /help."""
-    chat_type = update.effective_chat.type
     user_id = update.effective_user.id
     
     help_text = (
@@ -416,8 +439,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_owner(user_id):
             help_text += (
                 "⚙️ *Команды для владельца:*\n"
-                "`/addadmin @username` - Добавить админа\n"
-                "`/removeadmin @username` - Удалить админа\n"
+                "`/addadmin <ID>` - Добавить админа по ID\n"
+                "`/removeadmin <ID>` - Удалить админа по ID\n"
                 "`/listadmins` - Список админов\n"
                 "`/stats` - Статистика\n"
                 "`/backup` - Создать бэкап\n"
@@ -439,7 +462,7 @@ async def tops_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_all_info(update, context)
 
 async def addadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Добавление админа (только для владельца)."""
+    """Добавление админа по ID (только для владельца)."""
     user_id = update.effective_user.id
     
     if not is_owner(user_id):
@@ -447,28 +470,22 @@ async def addadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if not context.args:
-        await update.message.reply_text("❌ *Укажите username:* `/addadmin @username`", parse_mode='Markdown')
+        await update.message.reply_text("❌ *Укажите ID пользователя:* `/addadmin <ID>`", parse_mode='Markdown')
         return
     
-    username = context.args[0].strip().lstrip('@')
-    if not username:
-        await update.message.reply_text("❌ *Укажите username:* `/addadmin @username`", parse_mode='Markdown')
+    try:
+        target_user_id = int(context.args[0].strip())
+    except ValueError:
+        await update.message.reply_text("❌ *Неверный ID. ID должен быть числом.*", parse_mode='Markdown')
         return
     
-    # Здесь нужно получить user_id по username
-    # Поскольку мы не можем получить user_id только по username, 
-    # предлагаем владельцу добавить админа через бота в личке
-    await update.message.reply_text(
-        "ℹ️ *Добавление админа*\n\n"
-        "Для добавления админа:\n"
-        "1. Попросите пользователя написать боту в личку\n"
-        "2. Используйте команду `/addadmin` в ответ на его сообщение\n"
-        "3. Или используйте кнопку \"➕ Добавить админа\" в меню управления",
-        parse_mode='Markdown'
-    )
+    if add_admin_by_id(target_user_id, user_id):
+        await update.message.reply_text(f"✅ *Пользователь с ID {target_user_id} добавлен в админы!*", parse_mode='Markdown')
+    else:
+        await update.message.reply_text("❌ *Не удалось добавить админа*", parse_mode='Markdown')
 
 async def removeadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удаление админа (только для владельца)."""
+    """Удаление админа по ID (только для владельца)."""
     user_id = update.effective_user.id
     
     if not is_owner(user_id):
@@ -476,35 +493,23 @@ async def removeadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     if not context.args:
-        await update.message.reply_text("❌ *Укажите username:* `/removeadmin @username`", parse_mode='Markdown')
+        await update.message.reply_text("❌ *Укажите ID пользователя:* `/removeadmin <ID>`", parse_mode='Markdown')
         return
     
-    username = context.args[0].strip().lstrip('@')
-    if not username:
-        await update.message.reply_text("❌ *Укажите username:* `/removeadmin @username`", parse_mode='Markdown')
+    try:
+        target_user_id = int(context.args[0].strip())
+    except ValueError:
+        await update.message.reply_text("❌ *Неверный ID. ID должен быть числом.*", parse_mode='Markdown')
         return
     
-    # Получаем список админов и ищем нужного
-    admins = get_all_admins()
-    target_admin = None
-    
-    for admin_id, admin_username in admins:
-        if admin_username and admin_username.lower() == username.lower():
-            target_admin = admin_id
-            break
-    
-    if not target_admin:
-        await update.message.reply_text(f"❌ *Админ @{username} не найден*", parse_mode='Markdown')
-        return
-    
-    if target_admin == OWNER_ID:
+    if target_user_id == OWNER_ID:
         await update.message.reply_text("❌ *Нельзя удалить владельца*", parse_mode='Markdown')
         return
     
-    if remove_admin(target_admin):
-        await update.message.reply_text(f"✅ *Админ @{username} успешно удален*", parse_mode='Markdown')
+    if remove_admin(target_user_id):
+        await update.message.reply_text(f"✅ *Админ с ID {target_user_id} успешно удален*", parse_mode='Markdown')
     else:
-        await update.message.reply_text("❌ *Не удалось удалить админа*", parse_mode='Markdown')
+        await update.message.reply_text("❌ *Не удалось удалить админа или админ не найден*", parse_mode='Markdown')
 
 async def listadmins_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Список админов (только для владельца)."""
@@ -537,7 +542,8 @@ async def show_all_info_callback(query: CallbackQuery, context: ContextTypes.DEF
     if not users:
         chat_type = query.message.chat.type
         user_id = query.from_user.id
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             "📭 *База данных пуста*\n\n"
             "Добавьте информацию с помощью команды: +инфо username текст",
             parse_mode='Markdown',
@@ -561,7 +567,8 @@ async def show_page(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
     
     if not page_users:
         chat_type = query.message.chat.type
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             "📭 *На этой странице нет данных*",
             parse_mode='Markdown',
             reply_markup=get_back_keyboard(chat_type)
@@ -594,7 +601,7 @@ async def show_page(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
     chat_type = query.message.chat.type
     reply_markup = create_pagination_keyboard(users, current_page, chat_type)
     
-    await query.edit_message_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+    await safe_edit_message_text(query, message, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def page_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик переключения страниц."""
@@ -838,26 +845,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_type = query.message.chat.type
     
     if data == 'all_info':
+        await safe_edit_message_text(
+            query,
+            "⏳ *Загружаю список...*",
+            parse_mode='Markdown'
+        )
         await show_all_info_callback(query, context)
     
     elif data == 'management':
         # Проверяем, что это личное сообщение и пользователь админ
         if chat_type != 'private':
-            await query.edit_message_text(
+            await safe_edit_message_text(
+                query,
                 "⛔ *Эта функция доступна только в личном чате с ботом*",
                 parse_mode='Markdown'
             )
             return
             
         if not is_admin(user_id):
-            await query.edit_message_text(
+            await safe_edit_message_text(
+                query,
                 "⛔ *Доступ запрещен*\n\n"
                 "Эта функция доступна только админам.",
                 parse_mode='Markdown'
             )
             return
         
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             "⚙️ *Управление*\n\n"
             "Выберите действие:",
             parse_mode='Markdown',
@@ -866,56 +881,65 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == 'manage_admins':
         if not is_owner(user_id) or chat_type != 'private':
-            await query.edit_message_text(
+            await safe_edit_message_text(
+                query,
                 "⛔ *Эта функция доступна только владельцу в личном чате*",
                 parse_mode='Markdown'
             )
             return
         
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             "👥 *Управление админами*\n\n"
             "Выберите действие:",
             parse_mode='Markdown',
             reply_markup=get_admins_management_keyboard()
         )
     
-    elif data == 'add_admin':
+    elif data == 'add_admin_by_id':
         if not is_owner(user_id) or chat_type != 'private':
-            await query.edit_message_text(
+            await safe_edit_message_text(
+                query,
                 "⛔ *Эта функция доступна только владельцу в личном чате*",
                 parse_mode='Markdown'
             )
             return
         
-        await query.edit_message_text(
-            "➕ *Добавление админа*\n\n"
-            "Для добавления админа:\n"
-            "1. Попросите пользователя написать боту в личку\n"
-            "2. Используйте команду `/addadmin` в ответ на его сообщение\n"
-            "3. Или отправьте команду `/addadmin @username`",
+        await safe_edit_message_text(
+            query,
+            "➕ *Добавление админа по ID*\n\n"
+            "Для добавления админа отправьте команду:\n"
+            "`/addadmin <ID>`\n\n"
+            "Пример:\n"
+            "`/addadmin 123456789`",
             parse_mode='Markdown',
             reply_markup=get_back_keyboard(chat_type)
         )
     
-    elif data == 'remove_admin':
+    elif data == 'remove_admin_by_id':
         if not is_owner(user_id) or chat_type != 'private':
-            await query.edit_message_text(
+            await safe_edit_message_text(
+                query,
                 "⛔ *Эта функция доступна только владельцу в личном чате*",
                 parse_mode='Markdown'
             )
             return
         
-        await query.edit_message_text(
-            "➖ *Удаление админа*\n\n"
+        await safe_edit_message_text(
+            query,
+            "➖ *Удаление админа по ID*\n\n"
             "Для удаления админа отправьте команду:\n"
-            "`/removeadmin @username`",
+            "`/removeadmin <ID>`\n\n"
+            "Пример:\n"
+            "`/removeadmin 123456789`",
             parse_mode='Markdown',
             reply_markup=get_back_keyboard(chat_type)
         )
     
     elif data == 'list_admins':
         if not is_owner(user_id) or chat_type != 'private':
-            await query.edit_message_text(
+            await safe_edit_message_text(
+                query,
                 "⛔ *Эта функция доступна только владельцу в личном чате*",
                 parse_mode='Markdown'
             )
@@ -924,7 +948,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         admins = get_all_admins()
         
         if not admins:
-            await query.edit_message_text(
+            await safe_edit_message_text(
+                query,
                 "📭 *Список админов пуст*",
                 parse_mode='Markdown',
                 reply_markup=get_back_keyboard(chat_type)
@@ -938,7 +963,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             role = "👑 Владелец" if admin_id == OWNER_ID else "👤 Админ"
             message += f"{i}. {username_display} - {role}\n"
         
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             message,
             parse_mode='Markdown',
             reply_markup=get_back_keyboard(chat_type)
@@ -946,13 +972,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == 'back_to_management':
         if chat_type != 'private' or not is_admin(user_id):
-            await query.edit_message_text(
+            await safe_edit_message_text(
+                query,
                 "⛔ *Доступ запрещен*",
                 parse_mode='Markdown'
             )
             return
         
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             "⚙️ *Управление*\n\n"
             "Выберите действие:",
             parse_mode='Markdown',
@@ -961,7 +989,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == 'create_backup':
         if not is_owner(user_id) or chat_type != 'private':
-            await query.edit_message_text(
+            await safe_edit_message_text(
+                query,
                 "⛔ *Эта функция доступна только владельцу в личном чате*",
                 parse_mode='Markdown'
             )
@@ -971,13 +1000,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == 'import_db':
         if not is_owner(user_id) or chat_type != 'private':
-            await query.edit_message_text(
+            await safe_edit_message_text(
+                query,
                 "⛔ *Эта функция доступна только владельцу в личном чате*",
                 parse_mode='Markdown'
             )
             return
         
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             "🔄 *Импорт базы данных*\n\n"
             "Отправьте файл `info.db` в этот чат.\n"
             "⚠️ *Внимание:* Текущая БД будет заменена!",
@@ -987,7 +1018,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == 'stats':
         if chat_type != 'private' or not is_admin(user_id):
-            await query.edit_message_text(
+            await safe_edit_message_text(
+                query,
                 "⛔ *Эта функция доступна только админам в личном чате*",
                 parse_mode='Markdown'
             )
@@ -997,7 +1029,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == 'cleanup':
         if not is_owner(user_id) or chat_type != 'private':
-            await query.edit_message_text(
+            await safe_edit_message_text(
+                query,
                 "⛔ *Эта функция доступна только владельцу в личном чате*",
                 parse_mode='Markdown'
             )
@@ -1006,7 +1039,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cleanup_callback(query, context)
     
     elif data == 'back_to_main':
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             "🎮 *Главное меню*\n\n"
             "Выберите действие:",
             parse_mode='Markdown',
@@ -1019,7 +1053,8 @@ async def create_backup_callback(query: CallbackQuery, context: ContextTypes.DEF
     chat_type = query.message.chat.type
     
     if not is_owner(user_id) or chat_type != 'private':
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             "⛔ *Эта функция доступна только владельцу в личном чате*",
             parse_mode='Markdown'
         )
@@ -1034,13 +1069,15 @@ async def create_backup_callback(query: CallbackQuery, context: ContextTypes.DEF
                 caption="💾 *Резервная копия создана!*",
                 parse_mode='Markdown'
             )
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             "✅ *Резервная копия успешно создана и отправлена!*",
             parse_mode='Markdown',
             reply_markup=get_back_keyboard(chat_type)
         )
     else:
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             "❌ *Не удалось создать резервную копию*",
             parse_mode='Markdown',
             reply_markup=get_back_keyboard(chat_type)
@@ -1052,7 +1089,8 @@ async def stats_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_TYP
     chat_type = query.message.chat.type
     
     if not is_admin(user_id) or chat_type != 'private':
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             "⛔ *Эта функция доступна только админам в личном чате*",
             parse_mode='Markdown'
         )
@@ -1090,11 +1128,12 @@ async def stats_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_TYP
             for adder_id, count in top_adders:
                 message += f"  👤 `{adder_id}`: `{count}` записей\n"
         
-        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=get_back_keyboard(chat_type))
+        await safe_edit_message_text(message, parse_mode='Markdown', reply_markup=get_back_keyboard(chat_type))
         
     except Exception as e:
         logger.error(f"Ошибка статистики: {e}")
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             "❌ *Ошибка при получении статистики*",
             parse_mode='Markdown',
             reply_markup=get_back_keyboard(chat_type)
@@ -1106,14 +1145,16 @@ async def cleanup_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_T
     chat_type = query.message.chat.type
     
     if not is_owner(user_id) or chat_type != 'private':
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             "⛔ *Эта функция доступна только владельцу в личном чате*",
             parse_mode='Markdown'
         )
         return
     
     deleted_count = cleanup_database()
-    await query.edit_message_text(
+    await safe_edit_message_text(
+        query,
         f"🧹 *Очистка завершена!*\n\n"
         f"Удалено записей старше 30 дней: `{deleted_count}`",
         parse_mode='Markdown',
@@ -1245,14 +1286,14 @@ def main():
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
     # Обработчики кнопок
-    application.add_handler(CallbackQueryHandler(button_handler, pattern='^(all_info|management|manage_admins|add_admin|remove_admin|list_admins|back_to_management|create_backup|import_db|stats|cleanup|back_to_main)$'))
+    application.add_handler(CallbackQueryHandler(button_handler, pattern='^(all_info|management|manage_admins|add_admin_by_id|remove_admin_by_id|list_admins|back_to_management|create_backup|import_db|stats|cleanup|back_to_main)$'))
     application.add_handler(CallbackQueryHandler(page_handler, pattern='^page_'))
     
     # Запуск бота
     print("=" * 50)
     print("ИНФОРМАЦИОННЫЙ БОТ ЗАПУЩЕН")
     print("=" * 50)
-    print(f"👑 Владелец: {OWNER_ID}")
+    print(f" Владелец: {OWNER_ID}")
     print(f"🧹 Очищено записей: {cleaned}")
     print("=" * 50)
     print("📋 Основные команды:")
@@ -1264,9 +1305,9 @@ def main():
     print("• -инфо ник - Удалить все (админы в группе/личке)")
     print("• --инфо ник номер - Удалить конкретную запись (админы в группе/личке)")
     print("=" * 50)
-    print("👑 Команды владельца:")
-    print("• /addadmin @username - Добавить админа")
-    print("• /removeadmin @username - Удалить админа")
+    print(" Команды владельца:")
+    print("• /addadmin <ID> - Добавить админа по ID")
+    print("• /removeadmin <ID> - Удалить админа по ID")
     print("• /listadmins - Список админов")
     print("=" * 50)
     
@@ -1274,4 +1315,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
