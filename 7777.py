@@ -300,14 +300,16 @@ async def show_page(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
     message += f"Страница {current_page + 1} из {total_pages}\n"
     message += f"Всего пользователей: {total_users}\n\n"
     
-    for username in page_users:
+    for i, username in enumerate(page_users, 1):
         info_list = get_user_info(username)
         if info_list:
-            # Убираем @ чтобы не упоминать пользователей
-            message += f"👤 *{username}*\n"
+            # Добавляем @ для ссылки на профиль
+            display_username = f"@{username}" if not username.startswith('@') else username
+            message += f"{i}. 👤 *{display_username}*\n"
+            
             for j, (text, date) in enumerate(info_list[:3], 1):
                 date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')
-                message += f"  {j}. {text} ({date_str})\n"
+                message += f"   {j}. {text} ({date_str})\n"
             message += "\n"
     
     # Создаем клавиатуру пагинации с полной навигацией
@@ -353,14 +355,16 @@ async def show_all_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message += f"Страница {current_page + 1} из {total_pages}\n"
     message += f"Всего пользователей: {total_users}\n\n"
     
-    for username in page_users:
+    for i, username in enumerate(page_users, 1):
         info_list = get_user_info(username)
         if info_list:
-            # Убираем @ чтобы не упоминать пользователей
-            message += f"👤 *{username}*\n"
+            # Добавляем @ для ссылки на профиль
+            display_username = f"@{username}" if not username.startswith('@') else username
+            message += f"{i}. 👤 *{display_username}*\n"
+            
             for j, (text, date) in enumerate(info_list[:3], 1):
                 date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')
-                message += f"  {j}. {text} ({date_str})\n"
+                message += f"   {j}. {text} ({date_str})\n"
             message += "\n"
     
     # Создаем клавиатуру пагинации
@@ -368,7 +372,7 @@ async def show_all_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
 
-# ========== ОБРАБОТЧИКИ СООБЩЕНИЙ (УБРАНЫ УПОМИНАНИЯ) ==========
+# ========== ОБРАБОТЧИКИ СООБЩЕНИЙ С ИСПРАВЛЕННОЙ НУМЕРАЦИЕЙ ==========
 async def handle_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик !инфо ник (без упоминания)."""
     try:
@@ -396,7 +400,9 @@ async def handle_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
         
-        response = f"📋 *Информация о {username}:*\n\n"
+        # Добавляем @ для ссылки на профиль
+        display_username = f"@{username}" if not username.startswith('@') else username
+        response = f"📋 *Информация о {display_username}:*\n\n"
         
         for i, (text, date) in enumerate(info_list, 1):
             date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
@@ -431,8 +437,10 @@ async def handle_add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success = add_user_info(username, info_text, update.effective_user.id)
         
         if success:
+            # Добавляем @ для ссылки на профиль
+            display_username = f"@{username}" if not username.startswith('@') else username
             await update.message.reply_text(
-                f"✅ Информация о {username} успешно добавлена!",
+                f"✅ Информация о {display_username} успешно добавлена!",
                 parse_mode='Markdown'
             )
         else:
@@ -463,8 +471,10 @@ async def handle_delete_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
         success = delete_user_info(username)
         
         if success:
+            # Добавляем @ для ссылки на профиль
+            display_username = f"@{username}" if not username.startswith('@') else username
             await update.message.reply_text(
-                f"✅ Информация о {username} успешно удалена!",
+                f"✅ Информация о {display_username} успешно удалена!",
                 parse_mode='Markdown'
             )
         else:
