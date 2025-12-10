@@ -148,7 +148,7 @@ def delete_user_info(username: str):
         return False
 
 # ========== ФУНКЦИИ ПАГИНАЦИИ ==========
-def create_pagination_keyboard(users: List[str], current_page: int) -> InlineKeyboardMarkup:
+def create_pagination_keyboard(users: List[str], current_page: int, chat_type: str, user_id: int) -> InlineKeyboardMarkup:
     """Создает клавиатуру пагинации для списка пользователей."""
     items_per_page = 10
     total_pages = (len(users) + items_per_page - 1) // items_per_page
@@ -181,8 +181,9 @@ def create_pagination_keyboard(users: List[str], current_page: int) -> InlineKey
     if nav_buttons:
         keyboard.append(nav_buttons)
     
-    # Кнопка "Назад в меню"
-    keyboard.append([InlineKeyboardButton("🔙 Назад в меню", callback_data='back_to_main')])
+    # Кнопка "Назад в меню" - для лички показываем меню, для группы просто удаляем сообщение
+    if chat_type == 'private':
+        keyboard.append([InlineKeyboardButton("🔙 Назад в меню", callback_data='back_to_main')])
     
     return InlineKeyboardMarkup(keyboard)
 
@@ -193,15 +194,16 @@ def get_paginated_users(users: List[str], page: int = 0, items_per_page: int = 1
     return users[start_idx:end_idx], len(users)
 
 # ========== КЛАВИАТУРЫ ==========
-def get_main_menu_keyboard():
-    """Клавиатура главного меню."""
+def get_main_menu_keyboard(chat_type: str, user_id: int):
+    """Клавиатура главного меню с учетом типа чата."""
     keyboard = [
-        [InlineKeyboardButton("📝 Добавить информацию", callback_data='add_info')],
-        [InlineKeyboardButton("🗑️ Удалить информацию", callback_data='delete_info')],
-        [InlineKeyboardButton("🔍 Найти информацию", callback_data='search_info')],
         [InlineKeyboardButton("📋 Весь список", callback_data='all_info')],
-        [InlineKeyboardButton("⚙️ Управление БД", callback_data='db_management')]
     ]
+    
+    # Добавляем админ-панель только в личных сообщениях и только для владельца
+    if chat_type == 'private' and is_owner(user_id):
+        keyboard.append([InlineKeyboardButton("⚙️ Управление БД", callback_data='db_management')])
+    
     return InlineKeyboardMarkup(keyboard)
 
 def get_db_management_keyboard():
@@ -215,24 +217,29 @@ def get_db_management_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def get_back_keyboard():
-    """Кнопка возврата."""
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]]
-    return InlineKeyboardMarkup(keyboard)
+def get_back_keyboard(chat_type: str):
+    """Кнопка возврата с учетом типа чата."""
+    if chat_type == 'private':
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]]
+        return InlineKeyboardMarkup(keyboard)
+    return None
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start."""
+    chat_type = update.effective_chat.type
+    user_id = update.effective_user.id
+    
     await update.message.reply_text(
         "🎮 *Информационный Бот*\n\n"
         "✨ *Возможности:*\n"
-        "• 📝 Добавление информации о пользователях\n"
+        "• 📝 Добавление информации о пользователях (через команды)\n"
         "• 🔍 Поиск и просмотр информации\n"
         "• 🗑️ Управление записями\n"
         "• 💾 Резервное копирование (для владельца)\n\n"
         "👇 Используйте кнопки ниже для навигации:",
         parse_mode='Markdown',
-        reply_markup=get_main_menu_keyboard()
+        reply_markup=get_main_menu_keyboard(chat_type, user_id)
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -266,11 +273,13 @@ async def show_all_info_callback(query: CallbackQuery, context: ContextTypes.DEF
     users = get_all_users()
     
     if not users:
+        chat_type = query.message.chat.type
+        user_id = query.from_user.id
         await query.edit_message_text(
             "📭 *База данных пуста*\n\n"
-            "Добавьте информацию с помощью кнопки ниже:",
+            "Добавьте информацию с помощью команды: +инфо username текст",
             parse_mode='Markdown',
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_main_menu_keyboard(chat_type, user_id)
         )
         return
     
@@ -289,10 +298,11 @@ async def show_page(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
     total_pages = (total_users + items_per_page - 1) // items_per_page
     
     if not page_users:
+        chat_type = query.message.chat.type
         await query.edit_message_text(
             "📭 *На этой странице нет данных*",
             parse_mode='Markdown',
-            reply_markup=get_back_keyboard()
+            reply_markup=get_back_keyboard(chat_type)
         )
         return
     
@@ -313,7 +323,9 @@ async def show_page(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
             message += "\n"
     
     # Создаем клавиатуру пагинации с полной навигацией
-    reply_markup = create_pagination_keyboard(users, current_page)
+    chat_type = query.message.chat.type
+    user_id = query.from_user.id
+    reply_markup = create_pagination_keyboard(users, current_page, chat_type, user_id)
     
     await query.edit_message_text(message, parse_mode='Markdown', reply_markup=reply_markup)
 
@@ -368,7 +380,9 @@ async def show_all_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message += "\n"
     
     # Создаем клавиатуру пагинации
-    reply_markup = create_pagination_keyboard(users, current_page)
+    chat_type = update.effective_chat.type
+    user_id = update.effective_user.id
+    reply_markup = create_pagination_keyboard(users, current_page, chat_type, user_id)
     
     await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
 
@@ -487,7 +501,7 @@ async def handle_delete_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(f"Ошибка удаления: {e}")
         await update.message.reply_text("❌ Ошибка при удалении информации")
 
-# ========== ОСТАВШИЕСЯ ФУНКЦИИ БЕЗ ИЗМЕНЕНИЙ ==========
+# ========== ОСТАВШИЕСЯ ФУНКЦИИ С ИСПРАВЛЕНИЯМИ ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик нажатий на кнопки."""
     query = update.callback_query
@@ -495,44 +509,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     data = query.data
     
-    if data == 'add_info':
-        await query.edit_message_text(
-            "📝 *Добавление информации*\n\n"
-            "Отправьте сообщение в формате:\n"
-            "`+инфо username текст информации`\n\n"
-            "Пример:\n"
-            "`+инфо ivanov любит котиков`",
-            parse_mode='Markdown',
-            reply_markup=get_back_keyboard()
-        )
-    
-    elif data == 'delete_info':
-        await query.edit_message_text(
-            "🗑️ *Удаление информации*\n\n"
-            "Отправьте сообщение в формате:\n"
-            "`-инфо username`\n\n"
-            "Пример:\n"
-            "`-инфо ivanov`",
-            parse_mode='Markdown',
-            reply_markup=get_back_keyboard()
-        )
-    
-    elif data == 'search_info':
-        await query.edit_message_text(
-            "🔍 *Поиск информации*\n\n"
-            "Отправьте сообщение в формате:\n"
-            "`!инфо username`\n\n"
-            "Пример:\n"
-            "`!инфо ivanov`",
-            parse_mode='Markdown',
-            reply_markup=get_back_keyboard()
-        )
-    
-    elif data == 'all_info':
+    if data == 'all_info':
         await show_all_info_callback(query, context)
     
     elif data == 'db_management':
         user_id = query.from_user.id
+        chat_type = query.message.chat.type
+        
+        # Проверяем, что это личное сообщение и пользователь владелец
+        if chat_type != 'private':
+            await query.edit_message_text(
+                "⛔ *Эта функция доступна только в личном чате с ботом*\n\n"
+                "Перейдите в личку: @вашбот",  # Замените на ваш username бота
+                parse_mode='Markdown'
+            )
+            return
+            
         if is_owner(user_id):
             await query.edit_message_text(
                 "⚙️ *Управление базой данных*\n\n"
@@ -544,21 +536,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 "⛔ *Доступ запрещен*\n\n"
                 "Эта функция доступна только владельцу бота.",
-                parse_mode='Markdown',
-                reply_markup=get_back_keyboard()
+                parse_mode='Markdown'
             )
     
     elif data == 'create_backup':
         await create_backup_callback(query, context)
     
     elif data == 'import_db':
-        await query.edit_message_text(
-            "🔄 *Импорт базы данных*\n\n"
-            "Отправьте файл `info.db` в этот чат.\n"
-            "⚠️ *Внимание:* Текущая БД будет заменена!",
-            parse_mode='Markdown',
-            reply_markup=get_back_keyboard()
-        )
+        chat_type = query.message.chat.type
+        if chat_type == 'private':
+            await query.edit_message_text(
+                "🔄 *Импорт базы данных*\n\n"
+                "Отправьте файл `info.db` в этот чат.\n"
+                "⚠️ *Внимание:* Текущая БД будет заменена!",
+                parse_mode='Markdown',
+                reply_markup=get_back_keyboard(chat_type)
+            )
+        else:
+            await query.edit_message_text(
+                "⛔ *Эта функция доступна только в личном чате с ботом*",
+                parse_mode='Markdown'
+            )
     
     elif data == 'stats':
         await stats_callback(query, context)
@@ -567,21 +565,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cleanup_callback(query, context)
     
     elif data == 'back_to_main':
+        chat_type = query.message.chat.type
+        user_id = query.from_user.id
         await query.edit_message_text(
             "🎮 *Главное меню*\n\n"
             "Выберите действие:",
             parse_mode='Markdown',
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_main_menu_keyboard(chat_type, user_id)
         )
 
 async def create_backup_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
     """Создает резервную копию БД."""
     user_id = query.from_user.id
-    if not is_owner(user_id):
+    chat_type = query.message.chat.type
+    
+    if not is_owner(user_id) or chat_type != 'private':
         await query.edit_message_text(
-            "⛔ *Доступ запрещен*",
-            parse_mode='Markdown',
-            reply_markup=get_back_keyboard()
+            "⛔ *Эта функция доступна только владельцу в личном чате*",
+            parse_mode='Markdown'
         )
         return
     
@@ -597,23 +598,24 @@ async def create_backup_callback(query: CallbackQuery, context: ContextTypes.DEF
         await query.edit_message_text(
             "✅ *Резервная копия успешно создана и отправлена!*",
             parse_mode='Markdown',
-            reply_markup=get_back_keyboard()
+            reply_markup=get_back_keyboard(chat_type)
         )
     else:
         await query.edit_message_text(
             "❌ *Не удалось создать резервную копию*",
             parse_mode='Markdown',
-            reply_markup=get_back_keyboard()
+            reply_markup=get_back_keyboard(chat_type)
         )
 
 async def stats_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
     """Показывает статистику БД."""
     user_id = query.from_user.id
-    if not is_owner(user_id):
+    chat_type = query.message.chat.type
+    
+    if not is_owner(user_id) or chat_type != 'private':
         await query.edit_message_text(
-            "⛔ *Доступ запрещен*",
-            parse_mode='Markdown',
-            reply_markup=get_back_keyboard()
+            "⛔ *Эта функция доступна только владельцу в личном чате*",
+            parse_mode='Markdown'
         )
         return
     
@@ -649,24 +651,25 @@ async def stats_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_TYP
             for user_id, count in top_adders:
                 message += f"  👤 {user_id}: `{count}` записей\n"
         
-        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=get_back_keyboard())
+        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=get_back_keyboard(chat_type))
         
     except Exception as e:
         logger.error(f"Ошибка статистики: {e}")
         await query.edit_message_text(
             "❌ *Ошибка при получении статистики*",
             parse_mode='Markdown',
-            reply_markup=get_back_keyboard()
+            reply_markup=get_back_keyboard(chat_type)
         )
 
 async def cleanup_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
     """Очищает старые записи."""
     user_id = query.from_user.id
-    if not is_owner(user_id):
+    chat_type = query.message.chat.type
+    
+    if not is_owner(user_id) or chat_type != 'private':
         await query.edit_message_text(
-            "⛔ *Доступ запрещен*",
-            parse_mode='Markdown',
-            reply_markup=get_back_keyboard()
+            "⛔ *Эта функция доступна только владельцу в личном чате*",
+            parse_mode='Markdown'
         )
         return
     
@@ -675,17 +678,17 @@ async def cleanup_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_T
         f"🧹 *Очистка завершена!*\n\n"
         f"Удалено записей старше 30 дней: `{deleted_count}`",
         parse_mode='Markdown',
-        reply_markup=get_back_keyboard()
+        reply_markup=get_back_keyboard(chat_type)
     )
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик документов (импорт БД)."""
     try:
         user_id = update.effective_user.id
+        chat_type = update.effective_chat.type
         
-        # Проверяем владельца
-        if not is_owner(user_id):
-            # Игнорируем документы от не-владельцев
+        # Проверяем владельца и тип чата
+        if not is_owner(user_id) or chat_type != 'private':
             return
         
         document = update.message.document
@@ -766,11 +769,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif text.startswith('-инфо '):
             await handle_delete_info(update, context)
         elif text.lower() in ['меню', 'menu', 'start', 'начать']:
+            chat_type = update.effective_chat.type
+            user_id = update.effective_user.id
             await update.message.reply_text(
                 "🎮 *Главное меню*\n\n"
                 "Выберите действие:",
                 parse_mode='Markdown',
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(chat_type, user_id)
             )
             
     except Exception as e:
@@ -798,7 +803,7 @@ def main():
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
     # Обработчики кнопок
-    application.add_handler(CallbackQueryHandler(button_handler, pattern='^(add_info|delete_info|search_info|all_info|db_management|create_backup|import_db|stats|cleanup|back_to_main)$'))
+    application.add_handler(CallbackQueryHandler(button_handler, pattern='^(all_info|db_management|create_backup|import_db|stats|cleanup|back_to_main)$'))
     application.add_handler(CallbackQueryHandler(page_handler, pattern='^page_'))
     
     # Запуск бота
@@ -810,11 +815,11 @@ def main():
     print("=" * 50)
     print("📋 Основные команды:")
     print("• /start - Запустить бот")
-    print("• /help - Справка")
+    print("• /help - Справка (все команды)")
     print("• /tops - Весь список")
-    print("• +инфо ник текст - Добавить")
-    print("• -инфо ник - Удалить")
-    print("• !инфо ник - Найти")
+    print("• +инфо ник текст - Добавить информацию")
+    print("• -инфо ник - Удалить информацию")
+    print("• !инфо ник - Найти информацию")
     print("=" * 50)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
