@@ -120,12 +120,21 @@ def is_admin(user_id: int) -> bool:
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
+        
+        # Проверяем существование таблицы admins
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='admins'")
+        if not cursor.fetchone():
+            # Таблицы нет, значит админов кроме владельца нет
+            conn.close()
+            return False
+            
         cursor.execute('SELECT 1 FROM admins WHERE user_id = ?', (user_id,))
         result = cursor.fetchone() is not None
         conn.close()
         return result
     except Exception as e:
         logger.error(f"Ошибка при проверке админа: {e}")
+        # В случае ошибки считаем, что пользователь не админ
         return False
 
 def get_all_admins():
@@ -1265,3 +1274,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
