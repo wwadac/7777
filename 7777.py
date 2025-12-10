@@ -147,6 +147,51 @@ def delete_user_info(username: str):
         logger.error(f"Ошибка при удалении информации: {e}")
         return False
 
+# ========== ФУНКЦИИ ПАГИНАЦИИ ==========
+def create_pagination_keyboard(users: List[str], current_page: int) -> InlineKeyboardMarkup:
+    """Создает клавиатуру пагинации для списка пользователей."""
+    items_per_page = 10
+    total_pages = (len(users) + items_per_page - 1) // items_per_page
+    
+    keyboard = []
+    
+    # Кнопки навигации
+    nav_buttons = []
+    
+    # Кнопка "В начало" (только если не на первой странице)
+    if current_page > 0:
+        nav_buttons.append(InlineKeyboardButton("⏮️ В начало", callback_data=f'page_0'))
+    
+    # Кнопка "Назад"
+    if current_page > 0:
+        nav_buttons.append(InlineKeyboardButton("◀️ Назад", callback_data=f'page_{current_page-1}'))
+    
+    # Информация о странице
+    info_button = InlineKeyboardButton(f"📄 {current_page+1}/{total_pages}", callback_data="noop")
+    nav_buttons.append(info_button)
+    
+    # Кнопка "Вперед"
+    if current_page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("Вперед ▶️", callback_data=f'page_{current_page+1}'))
+    
+    # Кнопка "В конец" (только если не на последней странице)
+    if current_page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("В конец ⏭️", callback_data=f'page_{total_pages-1}'))
+    
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    # Кнопка "Назад в меню"
+    keyboard.append([InlineKeyboardButton("🔙 Назад в меню", callback_data='back_to_main')])
+    
+    return InlineKeyboardMarkup(keyboard)
+
+def get_paginated_users(users: List[str], page: int = 0, items_per_page: int = 10) -> tuple:
+    """Возвращает пользователей для конкретной страницы."""
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(users))
+    return users[start_idx:end_idx], len(users)
+
 # ========== КЛАВИАТУРЫ ==========
 def get_main_menu_keyboard():
     """Клавиатура главного меню."""
@@ -199,9 +244,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/help` - Эта справка\n"
         "`/tops` - Весь список информации\n\n"
         "📝 *Работа с информацией:*\n"
-        "`!инфо @username` - Найти информацию\n"
-        "`+инфо @username текст` - Добавить информацию\n"
-        "`-инфо @username` - Удалить информацию\n\n"
+        "`!инфо username` - Найти информацию\n"
+        "`+инфо username текст` - Добавить информацию\n"
+        "`-инфо username` - Удалить информацию\n\n"
         "⚙️ *Управление БД (владелец):*\n"
         "`/stats` - Статистика\n"
         "`/backup` - Создать бэкап\n"
@@ -215,7 +260,224 @@ async def tops_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /tops."""
     await show_all_info(update, context)
 
-# ========== ОБРАБОТЧИКИ CALLBACK ==========
+# ========== ОБНОВЛЕННЫЕ ФУНКЦИИ ПАГИНАЦИИ ==========
+async def show_all_info_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает всю информацию с пагинацией (через callback)."""
+    users = get_all_users()
+    
+    if not users:
+        await query.edit_message_text(
+            "📭 *База данных пуста*\n\n"
+            "Добавьте информацию с помощью кнопки ниже:",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+    
+    context.user_data['all_users'] = users
+    context.user_data['current_page'] = 0
+    
+    await show_page(query, context)
+
+async def show_page(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает страницу со списком пользователей с полной навигацией."""
+    users = context.user_data.get('all_users', [])
+    current_page = context.user_data.get('current_page', 0)
+    items_per_page = 10
+    
+    page_users, total_users = get_paginated_users(users, current_page, items_per_page)
+    total_pages = (total_users + items_per_page - 1) // items_per_page
+    
+    if not page_users:
+        await query.edit_message_text(
+            "📭 *На этой странице нет данных*",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard()
+        )
+        return
+    
+    message = f"📋 *Весь список информации*\n"
+    message += f"Страница {current_page + 1} из {total_pages}\n"
+    message += f"Всего пользователей: {total_users}\n\n"
+    
+    for username in page_users:
+        info_list = get_user_info(username)
+        if info_list:
+            # Убираем @ чтобы не упоминать пользователей
+            message += f"👤 *{username}*\n"
+            for j, (text, date) in enumerate(info_list[:3], 1):
+                date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')
+                message += f"  {j}. {text} ({date_str})\n"
+            message += "\n"
+    
+    # Создаем клавиатуру пагинации с полной навигацией
+    reply_markup = create_pagination_keyboard(users, current_page)
+    
+    await query.edit_message_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def page_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик переключения страниц."""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    if data == "noop":
+        return
+    
+    page_num = int(data.split('_')[1])
+    context.user_data['current_page'] = page_num
+    
+    await show_page(query, context)
+
+async def show_all_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает всю информацию с пагинацией."""
+    users = get_all_users()
+    
+    if not users:
+        await update.message.reply_text(
+            "📭 *База данных пуста*",
+            parse_mode='Markdown'
+        )
+        return
+    
+    context.user_data['all_users'] = users
+    context.user_data['current_page'] = 0
+    
+    # Для обычного сообщения создаем начальную страницу
+    current_page = 0
+    items_per_page = 10
+    page_users, total_users = get_paginated_users(users, current_page, items_per_page)
+    total_pages = (total_users + items_per_page - 1) // items_per_page
+    
+    message = f"📋 *Весь список информации*\n"
+    message += f"Страница {current_page + 1} из {total_pages}\n"
+    message += f"Всего пользователей: {total_users}\n\n"
+    
+    for username in page_users:
+        info_list = get_user_info(username)
+        if info_list:
+            # Убираем @ чтобы не упоминать пользователей
+            message += f"👤 *{username}*\n"
+            for j, (text, date) in enumerate(info_list[:3], 1):
+                date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')
+                message += f"  {j}. {text} ({date_str})\n"
+            message += "\n"
+    
+    # Создаем клавиатуру пагинации
+    reply_markup = create_pagination_keyboard(users, current_page)
+    
+    await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+
+# ========== ОБРАБОТЧИКИ СООБЩЕНИЙ (УБРАНЫ УПОМИНАНИЯ) ==========
+async def handle_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик !инфо ник (без упоминания)."""
+    try:
+        text = update.message.text.strip()
+        
+        if not text.startswith('!инфо '):
+            return
+        
+        parts = text.split(' ', 1)
+        if len(parts) < 2:
+            await update.message.reply_text("❌ Формат: `!инфо username`", parse_mode='Markdown')
+            return
+        
+        username = parts[1].strip().lstrip('@')  # Убираем @ если есть
+        if not username:
+            await update.message.reply_text("❌ Укажите username", parse_mode='Markdown')
+            return
+        
+        info_list = get_user_info(username)
+        
+        if not info_list:
+            await update.message.reply_text(
+                f"ℹ️ Информация о {username} не найдена.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        response = f"📋 *Информация о {username}:*\n\n"
+        
+        for i, (text, date) in enumerate(info_list, 1):
+            date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+            response += f"{i}. {text}\n   📅 {date_str}\n\n"
+        
+        await update.message.reply_text(response, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Ошибка поиска: {e}")
+        await update.message.reply_text("❌ Ошибка при поиске информации")
+
+async def handle_add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик +инфо ник текст (без упоминания)."""
+    try:
+        text = update.message.text.strip()
+        
+        if not text.startswith('+инфо '):
+            return
+        
+        parts = text.split(' ', 2)
+        if len(parts) < 3:
+            await update.message.reply_text("❌ Формат: `+инфо username текст`", parse_mode='Markdown')
+            return
+        
+        username = parts[1].strip().lstrip('@')  # Убираем @ если есть
+        info_text = parts[2].strip()
+        
+        if not username or not info_text:
+            await update.message.reply_text("❌ Укажите username и текст", parse_mode='Markdown')
+            return
+        
+        success = add_user_info(username, info_text, update.effective_user.id)
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ Информация о {username} успешно добавлена!",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text("❌ Не удалось добавить информацию")
+            
+    except Exception as e:
+        logger.error(f"Ошибка добавления: {e}")
+        await update.message.reply_text("❌ Ошибка при добавлении информации")
+
+async def handle_delete_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик -инфо ник (без упоминания)."""
+    try:
+        text = update.message.text.strip()
+        
+        if not text.startswith('-инфо '):
+            return
+        
+        parts = text.split(' ', 1)
+        if len(parts) < 2:
+            await update.message.reply_text("❌ Формат: `-инфо username`", parse_mode='Markdown')
+            return
+        
+        username = parts[1].strip().lstrip('@')  # Убираем @ если есть
+        if not username:
+            await update.message.reply_text("❌ Укажите username", parse_mode='Markdown')
+            return
+        
+        success = delete_user_info(username)
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ Информация о {username} успешно удалена!",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                f"ℹ️ Информация о {username} не найдена.",
+                parse_mode='Markdown'
+            )
+            
+    except Exception as e:
+        logger.error(f"Ошибка удаления: {e}")
+        await update.message.reply_text("❌ Ошибка при удалении информации")
+
+# ========== ОСТАВШИЕСЯ ФУНКЦИИ БЕЗ ИЗМЕНЕНИЙ ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик нажатий на кнопки."""
     query = update.callback_query
@@ -227,9 +489,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "📝 *Добавление информации*\n\n"
             "Отправьте сообщение в формате:\n"
-            "`+инфо @username текст информации`\n\n"
+            "`+инфо username текст информации`\n\n"
             "Пример:\n"
-            "`+инфо @ivanov любит котиков`",
+            "`+инфо ivanov любит котиков`",
             parse_mode='Markdown',
             reply_markup=get_back_keyboard()
         )
@@ -238,9 +500,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "🗑️ *Удаление информации*\n\n"
             "Отправьте сообщение в формате:\n"
-            "`-инфо @username`\n\n"
+            "`-инфо username`\n\n"
             "Пример:\n"
-            "`-инфо @ivanov`",
+            "`-инфо ivanov`",
             parse_mode='Markdown',
             reply_markup=get_back_keyboard()
         )
@@ -249,9 +511,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "🔍 *Поиск информации*\n\n"
             "Отправьте сообщение в формате:\n"
-            "`!инфо @username`\n\n"
+            "`!инфо username`\n\n"
             "Пример:\n"
-            "`!инфо @ivanov`",
+            "`!инфо ivanov`",
             parse_mode='Markdown',
             reply_markup=get_back_keyboard()
         )
@@ -301,72 +563,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
         )
-
-async def show_all_info_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает всю информацию (через callback)."""
-    users = get_all_users()
-    
-    if not users:
-        await query.edit_message_text(
-            "📭 *База данных пуста*\n\n"
-            "Добавьте информацию с помощью кнопки ниже:",
-            parse_mode='Markdown',
-            reply_markup=get_main_menu_keyboard()
-        )
-        return
-    
-    # Формируем сообщение с пагинацией
-    context.user_data['all_users'] = users
-    context.user_data['current_page'] = 0
-    
-    await show_page(query, context)
-
-async def show_page(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает страницу со списком пользователей."""
-    users = context.user_data['all_users']
-    current_page = context.user_data['current_page']
-    items_per_page = 10
-    
-    total_pages = (len(users) + items_per_page - 1) // items_per_page
-    start_idx = current_page * items_per_page
-    end_idx = min(start_idx + items_per_page, len(users))
-    
-    message = f"📋 *Весь список информации*\n"
-    message += f"Страница {current_page + 1} из {total_pages}\n\n"
-    
-    for i in range(start_idx, end_idx):
-        username = users[i]
-        info_list = get_user_info(username)
-        if info_list:
-            message += f"👤 *@{username}*\n"
-            for j, (text, date) in enumerate(info_list[:3], 1):
-                date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')
-                message += f"  {j}. {text} ({date_str})\n"
-            message += "\n"
-    
-    # Создаем кнопки пагинации
-    keyboard = []
-    if current_page > 0:
-        keyboard.append(InlineKeyboardButton("⬅️ Назад", callback_data=f'page_{current_page-1}'))
-    if current_page < total_pages - 1:
-        keyboard.append(InlineKeyboardButton("Вперед ➡️", callback_data=f'page_{current_page+1}'))
-    
-    if keyboard:
-        reply_markup = InlineKeyboardMarkup([keyboard, [InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]])
-    else:
-        reply_markup = get_back_keyboard()
-    
-    await query.edit_message_text(message, parse_mode='Markdown', reply_markup=reply_markup)
-
-async def page_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик переключения страниц."""
-    query = update.callback_query
-    await query.answer()
-    
-    page_num = int(query.data.split('_')[1])
-    context.user_data['current_page'] = page_num
-    
-    await show_page(query, context)
 
 async def create_backup_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
     """Создает резервную копию БД."""
@@ -471,169 +667,6 @@ async def cleanup_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_T
         parse_mode='Markdown',
         reply_markup=get_back_keyboard()
     )
-
-# ========== ОБРАБОТЧИКИ СООБЩЕНИЙ ==========
-async def show_all_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает всю информацию."""
-    users = get_all_users()
-    
-    if not users:
-        await update.message.reply_text(
-            "📭 *База данных пуста*",
-            parse_mode='Markdown'
-        )
-        return
-    
-    # Отправляем первое сообщение с кнопками
-    context.user_data['all_users'] = users
-    context.user_data['current_page'] = 0
-    
-    await show_page_message(update, context)
-
-async def show_page_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает страницу в сообщении."""
-    users = context.user_data.get('all_users', [])
-    current_page = context.user_data.get('current_page', 0)
-    items_per_page = 10
-    
-    total_pages = (len(users) + items_per_page - 1) // items_per_page
-    start_idx = current_page * items_per_page
-    end_idx = min(start_idx + items_per_page, len(users))
-    
-    message = f"📋 *Весь список информации*\n"
-    message += f"Страница {current_page + 1} из {total_pages}\n\n"
-    
-    for i in range(start_idx, end_idx):
-        username = users[i]
-        info_list = get_user_info(username)
-        if info_list:
-            message += f"👤 *@{username}*\n"
-            for j, (text, date) in enumerate(info_list[:3], 1):
-                date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')
-                message += f"  {j}. {text} ({date_str})\n"
-            message += "\n"
-    
-    # Создаем кнопки пагинации
-    keyboard = []
-    if current_page > 0:
-        keyboard.append(InlineKeyboardButton("⬅️ Назад", callback_data=f'page_{current_page-1}'))
-    if current_page < total_pages - 1:
-        keyboard.append(InlineKeyboardButton("Вперед ➡️", callback_data=f'page_{current_page+1}'))
-    
-    reply_markup = InlineKeyboardMarkup([keyboard]) if keyboard else None
-    
-    if update.callback_query:
-        await update.callback_query.edit_message_text(message, parse_mode='Markdown', reply_markup=reply_markup)
-    else:
-        await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
-
-async def handle_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик !инфо @ник."""
-    try:
-        text = update.message.text.strip()
-        
-        if not text.startswith('!инфо '):
-            return
-        
-        parts = text.split(' ', 1)
-        if len(parts) < 2:
-            await update.message.reply_text("❌ Формат: `!инфо @username`", parse_mode='Markdown')
-            return
-        
-        username = parts[1].strip().lstrip('@')
-        if not username:
-            await update.message.reply_text("❌ Укажите username после @", parse_mode='Markdown')
-            return
-        
-        info_list = get_user_info(username)
-        
-        if not info_list:
-            await update.message.reply_text(
-                f"ℹ️ Информация о @{username} не найдена.",
-                parse_mode='Markdown'
-            )
-            return
-        
-        response = f"📋 *Информация о @{username}:*\n\n"
-        
-        for i, (text, date) in enumerate(info_list, 1):
-            date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
-            response += f"{i}. {text}\n   📅 {date_str}\n\n"
-        
-        await update.message.reply_text(response, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Ошибка поиска: {e}")
-        await update.message.reply_text("❌ Ошибка при поиске информации")
-
-async def handle_add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик +инфо @ник текст."""
-    try:
-        text = update.message.text.strip()
-        
-        if not text.startswith('+инфо '):
-            return
-        
-        parts = text.split(' ', 2)
-        if len(parts) < 3:
-            await update.message.reply_text("❌ Формат: `+инфо @username текст`", parse_mode='Markdown')
-            return
-        
-        username = parts[1].strip().lstrip('@')
-        info_text = parts[2].strip()
-        
-        if not username or not info_text:
-            await update.message.reply_text("❌ Укажите username и текст", parse_mode='Markdown')
-            return
-        
-        success = add_user_info(username, info_text, update.effective_user.id)
-        
-        if success:
-            await update.message.reply_text(
-                f"✅ Информация о @{username} успешно добавлена!",
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text("❌ Не удалось добавить информацию")
-            
-    except Exception as e:
-        logger.error(f"Ошибка добавления: {e}")
-        await update.message.reply_text("❌ Ошибка при добавлении информации")
-
-async def handle_delete_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик -инфо @ник."""
-    try:
-        text = update.message.text.strip()
-        
-        if not text.startswith('-инфо '):
-            return
-        
-        parts = text.split(' ', 1)
-        if len(parts) < 2:
-            await update.message.reply_text("❌ Формат: `-инфо @username`", parse_mode='Markdown')
-            return
-        
-        username = parts[1].strip().lstrip('@')
-        if not username:
-            await update.message.reply_text("❌ Укажите username после @", parse_mode='Markdown')
-            return
-        
-        success = delete_user_info(username)
-        
-        if success:
-            await update.message.reply_text(
-                f"✅ Информация о @{username} успешно удалена!",
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text(
-                f"ℹ️ Информация о @{username} не найдена.",
-                parse_mode='Markdown'
-            )
-            
-    except Exception as e:
-        logger.error(f"Ошибка удаления: {e}")
-        await update.message.reply_text("❌ Ошибка при удалении информации")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик документов (импорт БД)."""
@@ -760,7 +793,7 @@ def main():
     
     # Запуск бота
     print("=" * 50)
-    print("🎮 ИНФОРМАЦИОННЫЙ БОТ ЗАПУЩЕН")
+    print("ИНФОРМАЦИОННЫЙ БОТ ЗАПУЩЕН")
     print("=" * 50)
     print(f" Владелец: {ADMIN_IDS[0]}")
     print(f"🧹 Очищено записей: {cleaned}")
@@ -769,9 +802,9 @@ def main():
     print("• /start - Запустить бот")
     print("• /help - Справка")
     print("• /tops - Весь список")
-    print("• +инфо @ник текст - Добавить")
-    print("• -инфо @ник - Удалить")
-    print("• !инфо @ник - Найти")
+    print("• +инфо ник текст - Добавить")
+    print("• -инфо ник - Удалить")
+    print("• !инфо ник - Найти")
     print("=" * 50)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
