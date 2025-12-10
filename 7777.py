@@ -187,12 +187,12 @@ def get_all_users():
         return []
 
 def get_user_info(username: str):
-    """Получает информацию о пользователе."""
+    """Получает информацию о пользователе с ID записей."""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT info_text, added_date FROM info WHERE username = ? ORDER BY added_date DESC",
+            "SELECT id, info_text, added_date FROM info WHERE username = ? ORDER BY added_date DESC",
             (username,)
         )
         info = cursor.fetchall()
@@ -219,7 +219,7 @@ def add_user_info(username: str, info_text: str, added_by: int):
         return False
 
 def delete_user_info(username: str):
-    """Удаляет информацию о пользователе."""
+    """Удаляет всю информацию о пользователе."""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
@@ -230,6 +230,34 @@ def delete_user_info(username: str):
         return deleted_count > 0
     except Exception as e:
         logger.error(f"Ошибка при удалении информации: {e}")
+        return False
+
+def delete_specific_info(username: str, record_num: int):
+    """Удаляет конкретную запись о пользователе по номеру."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        # Получаем все записи пользователя
+        cursor.execute(
+            "SELECT id FROM info WHERE username = ? ORDER BY added_date DESC",
+            (username,)
+        )
+        records = cursor.fetchall()
+        
+        # Проверяем номер записи
+        if record_num < 1 or record_num > len(records):
+            return False
+        
+        # Удаляем конкретную запись
+        record_id = records[record_num - 1][0]
+        cursor.execute("DELETE FROM info WHERE id = ?", (record_id,))
+        conn.commit()
+        conn.close()
+        
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при удалении конкретной записи: {e}")
         return False
 
 # ========== ФУНКЦИИ ПАГИНАЦИИ ==========
@@ -345,9 +373,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Для админов в личке показываем дополнительные возможности
     if chat_type == 'private' and is_admin(user_id):
-        welcome_text += "• ⚙️ Управление базой данных (для админов)\n"
-    
-    welcome_text += "\n👇 Используйте кнопки ниже или команды:"
+        welcome_text += "• ⚙️ Управление (для админов)\n"
     
     await update.message.reply_text(
         welcome_text,
@@ -373,7 +399,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text += (
             "📝 *Команды для админов (только в личке):*\n"
             "`+инфо username текст` - Добавить информацию\n"
-            "`-инфо username` - Удалить информацию\n"
+            "`-инфо username` - Удалить всю информацию\n"
+            "`--инфо username номер` - Удалить конкретную запись\n"
             "`!инфо username` - Найти информацию\n\n"
         )
         
@@ -536,7 +563,10 @@ async def show_page(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
     message += f"Страница {current_page + 1} из {total_pages}\n"
     message += f"Всего пользователей: {total_users}\n\n"
     
-    for i, username in enumerate(page_users, 1):
+    # Вычисляем начальный номер для текущей страницы
+    start_number = current_page * items_per_page + 1
+    
+    for i, username in enumerate(page_users, start_number):
         info_list = get_user_info(username)
         if info_list:
             # Экранируем username для Markdown
@@ -544,7 +574,7 @@ async def show_page(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
             display_username = f"@{safe_username}" if not username.startswith('@') else safe_username
             message += f"{i}. 👤 *{display_username}*\n"
             
-            for j, (text, date) in enumerate(info_list[:3], 1):
+            for j, (_, text, date) in enumerate(info_list[:3], 1):
                 date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')
                 # Экранируем текст для Markdown
                 safe_text = escape_markdown(text)
@@ -595,7 +625,10 @@ async def show_all_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message += f"Страница {current_page + 1} из {total_pages}\n"
     message += f"Всего пользователей: {total_users}\n\n"
     
-    for i, username in enumerate(page_users, 1):
+    # Вычисляем начальный номер для текущей страницы
+    start_number = current_page * items_per_page + 1
+    
+    for i, username in enumerate(page_users, start_number):
         info_list = get_user_info(username)
         if info_list:
             # Экранируем username для Markdown
@@ -603,7 +636,7 @@ async def show_all_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
             display_username = f"@{safe_username}" if not username.startswith('@') else safe_username
             message += f"{i}. 👤 *{display_username}*\n"
             
-            for j, (text, date) in enumerate(info_list[:3], 1):
+            for j, (_, text, date) in enumerate(info_list[:3], 1):
                 date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')
                 # Экранируем текст для Markdown
                 safe_text = escape_markdown(text)
@@ -649,7 +682,7 @@ async def handle_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         display_username = f"@{safe_username}" if not username.startswith('@') else safe_username
         response = f"📋 *Информация о {display_username}:*\n\n"
         
-        for i, (text, date) in enumerate(info_list, 1):
+        for i, (_, text, date) in enumerate(info_list, 1):
             date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
             # Экранируем текст для Markdown
             safe_text = escape_markdown(text)
@@ -706,7 +739,7 @@ async def handle_add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка при добавлении информации")
 
 async def handle_delete_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик -инфо ник (только для админов в личке)."""
+    """Обработчик -инфо username (удалить все) и --инфо username номер (удалить конкретную)."""
     try:
         chat_type = update.effective_chat.type
         user_id = update.effective_user.id
@@ -717,34 +750,71 @@ async def handle_delete_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         text = update.message.text.strip()
         
-        if not text.startswith('-инфо '):
-            return
+        # Проверяем команду удаления всей информации
+        if text.startswith('-инфо ') and not text.startswith('--инфо'):
+            parts = text.split(' ', 1)
+            if len(parts) < 2:
+                await update.message.reply_text("❌ Формат: `-инфо username`", parse_mode='Markdown')
+                return
+            
+            username = parts[1].strip().lstrip('@')
+            if not username:
+                await update.message.reply_text("❌ Укажите username", parse_mode='Markdown')
+                return
+            
+            success = delete_user_info(username)
+            
+            if success:
+                safe_username = escape_markdown(username)
+                display_username = f"@{safe_username}" if not username.startswith('@') else safe_username
+                await update.message.reply_text(
+                    f"✅ Вся информация о {display_username} успешно удалена!",
+                    parse_mode='Markdown'
+                )
+            else:
+                await update.message.reply_text(
+                    f"ℹ️ Информация о {username} не найдена.",
+                    parse_mode='Markdown'
+                )
         
-        parts = text.split(' ', 1)
-        if len(parts) < 2:
-            await update.message.reply_text("❌ Формат: `-инфо username`", parse_mode='Markdown')
-            return
-        
-        username = parts[1].strip().lstrip('@')
-        if not username:
-            await update.message.reply_text("❌ Укажите username", parse_mode='Markdown')
-            return
-        
-        success = delete_user_info(username)
-        
-        if success:
-            # Экранируем username для Markdown
-            safe_username = escape_markdown(username)
-            display_username = f"@{safe_username}" if not username.startswith('@') else safe_username
-            await update.message.reply_text(
-                f"✅ Информация о {display_username} успешно удалена!",
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text(
-                f"ℹ️ Информация о {username} не найдена.",
-                parse_mode='Markdown'
-            )
+        # Проверяем команду удаления конкретной записи
+        elif text.startswith('--инфо '):
+            parts = text.split(' ', 2)
+            if len(parts) < 3:
+                await update.message.reply_text("❌ Формат: `--инфо username номер`", parse_mode='Markdown')
+                return
+            
+            username = parts[1].strip().lstrip('@')
+            record_num_str = parts[2].strip()
+            
+            if not username or not record_num_str:
+                await update.message.reply_text("❌ Укажите username и номер записи", parse_mode='Markdown')
+                return
+            
+            try:
+                record_num = int(record_num_str)
+                if record_num < 1:
+                    await update.message.reply_text("❌ Номер записи должен быть положительным числом", parse_mode='Markdown')
+                    return
+            except ValueError:
+                await update.message.reply_text("❌ Укажите корректный номер записи", parse_mode='Markdown')
+                return
+            
+            success = delete_specific_info(username, record_num)
+            
+            if success:
+                safe_username = escape_markdown(username)
+                display_username = f"@{safe_username}" if not username.startswith('@') else safe_username
+                await update.message.reply_text(
+                    f"✅ Запись №{record_num} о {display_username} успешно удалена!",
+                    parse_mode='Markdown'
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ Не удалось удалить запись №{record_num} о {username}.\n"
+                    f"Возможно, такой записи не существует.",
+                    parse_mode='Markdown'
+                )
             
     except Exception as e:
         logger.error(f"Ошибка удаления: {e}")
@@ -1129,7 +1199,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_info_command(update, context)
         elif text.startswith('+инфо '):
             await handle_add_info(update, context)
-        elif text.startswith('-инфо '):
+        elif text.startswith('-инфо ') or text.startswith('--инфо '):
             await handle_delete_info(update, context)
         elif text.lower() in ['меню', 'menu', 'start', 'начать']:
             user_id = update.effective_user.id
@@ -1175,7 +1245,7 @@ def main():
     print("=" * 50)
     print("ИНФОРМАЦИОННЫЙ БОТ ЗАПУЩЕН")
     print("=" * 50)
-    print(f" Владелец: {OWNER_ID}")
+    print(f"Владелец: {OWNER_ID}")
     print(f"🧹 Очищено записей: {cleaned}")
     print("=" * 50)
     print("📋 Основные команды:")
@@ -1184,9 +1254,10 @@ def main():
     print("• /tops - Весь список")
     print("• !инфо ник - Найти информацию (все)")
     print("• +инфо ник текст - Добавить (админы в личке)")
-    print("• -инфо ник - Удалить (админы в личке)")
+    print("• -инфо ник - Удалить все (админы в личке)")
+    print("• --инфо ник номер - Удалить конкретную запись (админы в личке)")
     print("=" * 50)
-    print("👑 Команды владельца:")
+    print(" Команды владельца:")
     print("• /addadmin @username - Добавить админа")
     print("• /removeadmin @username - Удалить админа")
     print("• /listadmins - Список админов")
