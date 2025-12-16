@@ -2062,14 +2062,12 @@ def main():
     os.makedirs(BACKUP_DIR, exist_ok=True)
     
     # Создаем приложение
-    app = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(TOKEN).build()
     
     # Добавляем обработчики команд
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("tops", tops_command))
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("mytopic", cmd_my_topic))
     application.add_handler(CommandHandler("addadmin", addadmin_command))
     application.add_handler(CommandHandler("removeadmin", removeadmin_command))
     application.add_handler(CommandHandler("listadmins", listadmins_command))
@@ -2083,13 +2081,13 @@ def main():
     application.add_handler(CommandHandler("collection_stats", collection_stats_command))
     
     # Обработчики сохранения сообщений
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, forward_text))
-    app.add_handler(MessageHandler(filters.PHOTO, forward_photo))
-    app.add_handler(MessageHandler(filters.VOICE, forward_voice))
-    app.add_handler(MessageHandler(filters.VIDEO_NOTE, forward_video_note))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
+    application.add_handler(MessageHandler(filters.VIDEO_NOTE, handle_video_note))
     
-        # Игнорируем стикеры, гифки, файлы и т.д.
-    application.add_handler(MessageHandler( 
+    # Игнорируем стикеры, гифки, файлы и т.д.
+    application.add_handler(MessageHandler(
+        filters.Sticker.ALL | filters.Animation.ALL | filters.Document.ALL | 
         filters.PHOTO | filters.AUDIO | filters.VIDEO,
         handle_stickers_and_other
     ))
@@ -2139,10 +2137,3 @@ def main():
     print("=" * 50)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == '__main__':
-    main()
-
-
-
-
