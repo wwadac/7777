@@ -14,14 +14,21 @@ from telegram.ext import (
     ContextTypes, 
     filters
 )
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TimedOut
 
 # ========== КОНФИГУРАЦИЯ ==========
-TOKEN = "8534057742:AAHWEBn4Z2FjKS5E9yEuaiEVoUBmKs5p1sM"
+TOKEN = "8534057742:AAE1EDuHUmBXo0vxsXR5XorlWgeXe3-4L98"
 OWNER_ID = 6893832048  # ID владельца
 DB_FILE = "info.db"
+SAVE_DB_FILE = "saved_messages.db"  # Новая база для сохраненных сообщений
 BACKUP_DIR = "backups"
 LOG_FILE = "bot.log"
+SAVE_DIR = "saved"  # Папка для сохранения файлов
+
+# Глобальные настройки сохранения
+COLLECTION_ENABLED = True  # Включен ли сбор сообщений по умолчанию
+LOG_CHAT_ID = -1003606590827  # ID чата для пересылки сообщений (замените на нужный)
+EXCLUDED_USERS = set()  # Исключенные пользователи
 
 # Настройка логирования
 logging.basicConfig(
@@ -34,7 +41,200 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== БАЗА ДАННЫХ ==========
+# ========== БАЗА ДАННЫХ ДЛЯ СОХРАНЕННЫХ СООБЩЕНИЙ ==========
+def init_save_db():
+    """Инициализация базы данных для сохраненных сообщений."""
+    conn = sqlite3.connect(SAVE_DB_FILE)
+    cursor = conn.cursor()
+    
+    # Таблица для сохраненных сообщений
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS saved_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            chat_id INTEGER NOT NULL,
+            chat_title TEXT,
+            chat_type TEXT,
+            message_type TEXT,
+            text TEXT,
+            file_id TEXT,
+            file_path TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Таблица для исключенных пользователей
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS excluded_users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            reason TEXT,
+            excluded_by INTEGER,
+            excluded_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Таблица для настроек
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+    
+    # Индексы для оптимизации
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON saved_messages(user_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_id ON saved_messages(chat_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON saved_messages(timestamp)')
+    
+    # Инициализация настроек по умолчанию
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('collection_enabled', '1')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('log_chat_id', ?)", (str(LOG_CHAT_ID) if LOG_CHAT_ID else '',))
+    
+    conn.commit()
+    conn.close()
+
+def load_settings():
+    """Загружает настройки из базы данных."""
+    try:
+        conn = sqlite3.connect(SAVE_DB_FILE)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT value FROM settings WHERE key = 'collection_enabled'")
+        result = cursor.fetchone()
+        collection_enabled = bool(int(result[0])) if result else True
+        
+        cursor.execute("SELECT user_id FROM excluded_users")
+        excluded = set(row[0] for row in cursor.fetchall())
+        
+        cursor.execute("SELECT value FROM settings WHERE key = 'log_chat_id'")
+        result = cursor.fetchone()
+        log_chat_id = int(result[0]) if result and result[0] else None
+        
+        conn.close()
+        
+        return collection_enabled, excluded, log_chat_id
+    except Exception as e:
+        logger.error(f"Ошибка загрузки настроек: {e}")
+        return True, set(), LOG_CHAT_ID
+
+def update_setting(key: str, value: str):
+    """Обновляет настройку в базе данных."""
+    try:
+        conn = sqlite3.connect(SAVE_DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            (key, value)
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка обновления настройки: {e}")
+        return False
+
+def add_excluded_user(user_id: int, username: str, reason: str, excluded_by: int):
+    """Добавляет пользователя в исключения."""
+    try:
+        conn = sqlite3.connect(SAVE_DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO excluded_users (user_id, username, reason, excluded_by) VALUES (?, ?, ?, ?)",
+            (user_id, username, reason, excluded_by)
+        )
+        conn.commit()
+        conn.close()
+        EXCLUDED_USERS.add(user_id)
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка добавления исключения: {e}")
+        return False
+
+def remove_excluded_user(user_id: int):
+    """Удаляет пользователя из исключений."""
+    try:
+        conn = sqlite3.connect(SAVE_DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM excluded_users WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        EXCLUDED_USERS.discard(user_id)
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка удаления исключения: {e}")
+        return False
+
+def get_excluded_users():
+    """Получает список исключенных пользователей."""
+    try:
+        conn = sqlite3.connect(SAVE_DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, username, reason, excluded_date FROM excluded_users ORDER BY excluded_date DESC")
+        users = cursor.fetchall()
+        conn.close()
+        return users
+    except Exception as e:
+        logger.error(f"Ошибка получения исключений: {e}")
+        return []
+
+def save_message_to_db(data):
+    """Сохраняет сообщение в базу данных."""
+    try:
+        conn = sqlite3.connect(SAVE_DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO saved_messages 
+            (message_id, user_id, username, first_name, last_name, chat_id, chat_title, 
+             chat_type, message_type, text, file_id, file_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', data)
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка сохранения сообщения: {e}")
+        return False
+
+def get_saved_stats():
+    """Получает статистику сохраненных сообщений."""
+    try:
+        conn = sqlite3.connect(SAVE_DB_FILE)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM saved_messages")
+        total = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM saved_messages")
+        unique_users = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(DISTINCT chat_id) FROM saved_messages")
+        unique_chats = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT message_type, COUNT(*) FROM saved_messages GROUP BY message_type")
+        by_type = cursor.fetchall()
+        
+        cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM saved_messages")
+        dates = cursor.fetchone()
+        
+        conn.close()
+        
+        return {
+            'total': total,
+            'unique_users': unique_users,
+            'unique_chats': unique_chats,
+            'by_type': by_type,
+            'dates': dates
+        }
+    except Exception as e:
+        logger.error(f"Ошибка получения статистики: {e}")
+        return None
+
+# ========== БАЗА ДАННЫХ ДЛЯ ИНФОРМАЦИИ (оригинальная) ==========
 def init_db():
     """Инициализация базы данных."""
     conn = sqlite3.connect(DB_FILE)
@@ -341,6 +541,10 @@ def get_main_menu_keyboard(chat_type: str, user_id: int):
     if chat_type == 'private' and is_admin(user_id):
         keyboard.append([InlineKeyboardButton("⚙️ Управление", callback_data='management')])
     
+    # Добавляем управление сбором сообщений только для владельца
+    if chat_type == 'private' and is_owner(user_id):
+        keyboard.append([InlineKeyboardButton("💾 Управление сбором", callback_data='collection_management')])
+    
     return InlineKeyboardMarkup(keyboard)
 
 def get_management_keyboard(user_id: int):
@@ -363,6 +567,19 @@ def get_management_keyboard(user_id: int):
         ])
     
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')])
+    return InlineKeyboardMarkup(keyboard)
+
+def get_collection_management_keyboard():
+    """Клавиатура управления сбором сообщений (только для владельца)."""
+    keyboard = [
+        [InlineKeyboardButton("▶️ Включить сбор", callback_data='enable_collection')],
+        [InlineKeyboardButton("⏸️ Выключить сбор", callback_data='disable_collection')],
+        [InlineKeyboardButton("➕ Добавить исключение", callback_data='add_exclusion')],
+        [InlineKeyboardButton("➖ Удалить исключение", callback_data='remove_exclusion')],
+        [InlineKeyboardButton("📋 Список исключений", callback_data='list_exclusions')],
+        [InlineKeyboardButton("📊 Статистика сбора", callback_data='collection_stats')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]
+    ]
     return InlineKeyboardMarkup(keyboard)
 
 def get_admins_management_keyboard():
@@ -391,7 +608,360 @@ async def safe_edit_message_text(query: CallbackQuery, text: str, parse_mode: st
         if "Message is not modified" not in str(e):
             raise
 
-# ========== ОБРАБОТЧИКИ КОМАНД ==========
+# ========== ОБРАБОТЧИКИ СОХРАНЕНИЯ СООБЩЕНИЙ ==========
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик текстовых сообщений для сохранения."""
+    global COLLECTION_ENABLED, EXCLUDED_USERS
+    
+    try:
+        # Проверяем, включен ли сбор сообщений
+        if not COLLECTION_ENABLED:
+            return
+        
+        user = update.effective_user
+        chat = update.effective_chat
+        message = update.effective_message
+        
+        # Проверяем, не является ли пользователь исключенным
+        if user.id in EXCLUDED_USERS:
+            return
+        
+        # Проверяем, не является ли сообщение командой
+        if message.text and message.text.startswith('/'):
+            return
+        
+        # Сохраняем в базу данных
+        data = (
+            message.message_id,
+            user.id,
+            user.username,
+            user.first_name,
+            user.last_name,
+            chat.id,
+            chat.title if hasattr(chat, 'title') else "Личный чат",
+            chat.type,
+            'text',
+            message.text[:1000] if message.text else '',  # Ограничиваем длину текста
+            None,  # file_id
+            None   # file_path
+        )
+        
+        save_message_to_db(data)
+        
+        # Логируем
+        logger.info(f"Сохранено текстовое сообщение от {user.username or user.id} в чате {chat.id}")
+        
+        # Не отвечаем пользователю
+        return
+        
+    except Exception as e:
+        logger.error(f"Ошибка сохранения текстового сообщения: {e}")
+
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик голосовых сообщений для сохранения."""
+    global COLLECTION_ENABLED, EXCLUDED_USERS
+    
+    try:
+        # Проверяем, включен ли сбор сообщений
+        if not COLLECTION_ENABLED:
+            return
+        
+        user = update.effective_user
+        chat = update.effective_chat
+        message = update.effective_message
+        
+        # Проверяем, не является ли пользователь исключенным
+        if user.id in EXCLUDED_USERS:
+            return
+        
+        # Получаем голосовое сообщение
+        voice = message.voice
+        if not voice:
+            return
+        
+        # Создаем папку для сохранения, если ее нет
+        os.makedirs(SAVE_DIR, exist_ok=True)
+        
+        # Получаем файл
+        file = await voice.get_file()
+        file_path = f"{SAVE_DIR}/voice_{voice.file_id}.ogg"
+        
+        # Скачиваем файл
+        await file.download_to_drive(file_path)
+        
+        # Сохраняем в базу данных
+        data = (
+            message.message_id,
+            user.id,
+            user.username,
+            user.first_name,
+            user.last_name,
+            chat.id,
+            chat.title if hasattr(chat, 'title') else "Личный чат",
+            chat.type,
+            'voice',
+            '',  # text
+            voice.file_id,
+            file_path
+        )
+        
+        save_message_to_db(data)
+        
+        # Логируем
+        logger.info(f"Сохранено голосовое сообщение от {user.username or user.id} в чате {chat.id}")
+        
+        # Не отвечаем пользователю
+        return
+        
+    except Exception as e:
+        logger.error(f"Ошибка сохранения голосового сообщения: {e}")
+
+async def handle_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик видеосообщений (кружков) для сохранения."""
+    global COLLECTION_ENABLED, EXCLUDED_USERS
+    
+    try:
+        # Проверяем, включен ли сбор сообщений
+        if not COLLECTION_ENABLED:
+            return
+        
+        user = update.effective_user
+        chat = update.effective_chat
+        message = update.effective_message
+        
+        # Проверяем, не является ли пользователь исключенным
+        if user.id in EXCLUDED_USERS:
+            return
+        
+        # Получаем видеосообщение
+        video_note = message.video_note
+        if not video_note:
+            return
+        
+        # Создаем папку для сохранения, если ее нет
+        os.makedirs(SAVE_DIR, exist_ok=True)
+        
+        # Получаем файл
+        file = await video_note.get_file()
+        file_path = f"{SAVE_DIR}/video_note_{video_note.file_id}.mp4"
+        
+        # Скачиваем файл
+        await file.download_to_drive(file_path)
+        
+        # Сохраняем в базу данных
+        data = (
+            message.message_id,
+            user.id,
+            user.username,
+            user.first_name,
+            user.last_name,
+            chat.id,
+            chat.title if hasattr(chat, 'title') else "Личный чат",
+            chat.type,
+            'video_note',
+            '',  # text
+            video_note.file_id,
+            file_path
+        )
+        
+        save_message_to_db(data)
+        
+        # Логируем
+        logger.info(f"Сохранено видеосообщение от {user.username or user.id} в чате {chat.id}")
+        
+        # Не отвечаем пользователю
+        return
+        
+    except Exception as e:
+        logger.error(f"Ошибка сохранения видеосообщения: {e}")
+
+async def handle_stickers_and_other(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик стикеров, гифок и других типов сообщений, которые нужно игнорировать."""
+    # Просто игнорируем эти типы сообщений
+    pass
+
+# ========== КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ СБОРОМ СООБЩЕНИЙ ==========
+async def collection_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для управления сбором сообщений."""
+    user_id = update.effective_user.id
+    
+    if not is_owner(user_id):
+        await update.message.reply_text("❌ *Эта команда доступна только владельцу*", parse_mode='Markdown')
+        return
+    
+    await update.message.reply_text(
+        "💾 *Управление сбором сообщений*\n\n"
+        "Выберите действие:",
+        parse_mode='Markdown',
+        reply_markup=get_collection_management_keyboard()
+    )
+
+async def toggle_collection_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для включения/выключения сбора сообщений."""
+    global COLLECTION_ENABLED
+    
+    user_id = update.effective_user.id
+    
+    if not is_owner(user_id):
+        await update.message.reply_text("❌ *Эта команда доступна только владельцу*", parse_mode='Markdown')
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ *Укажите действие:* `/toggle_collection on/off`\n\n"
+            "Пример:\n"
+            "`/toggle_collection on` - включить сбор\n"
+            "`/toggle_collection off` - выключить сбор",
+            parse_mode='Markdown'
+        )
+        return
+    
+    action = context.args[0].lower().strip()
+    
+    if action == 'on':
+        COLLECTION_ENABLED = True
+        update_setting('collection_enabled', '1')
+        await update.message.reply_text("✅ *Сбор сообщений включен!*", parse_mode='Markdown')
+    elif action == 'off':
+        COLLECTION_ENABLED = False
+        update_setting('collection_enabled', '0')
+        await update.message.reply_text("⏸️ *Сбор сообщений выключен!*", parse_mode='Markdown')
+    else:
+        await update.message.reply_text("❌ *Неверное действие. Используйте `on` или `off`*", parse_mode='Markdown')
+
+async def exclude_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для добавления пользователя в исключения."""
+    user_id = update.effective_user.id
+    
+    if not is_owner(user_id):
+        await update.message.reply_text("❌ *Эта команда доступна только владельцу*", parse_mode='Markdown')
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ *Укажите ID пользователя:* `/exclude <ID> [причина]`\n\n"
+            "Пример:\n"
+            "`/exclude 123456789 спам`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        target_user_id = int(context.args[0].strip())
+        reason = context.args[1] if len(context.args) > 1 else "Не указана"
+        
+        if target_user_id == OWNER_ID:
+            await update.message.reply_text("❌ *Нельзя исключить владельца*", parse_mode='Markdown')
+            return
+        
+        if add_excluded_user(target_user_id, "", reason, user_id):
+            await update.message.reply_text(
+                f"✅ *Пользователь с ID {target_user_id} добавлен в исключения!*\n"
+                f"Причина: {reason}",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text("❌ *Не удалось добавить в исключения*", parse_mode='Markdown')
+            
+    except ValueError:
+        await update.message.reply_text("❌ *Неверный ID. ID должен быть числом.*", parse_mode='Markdown')
+
+async def include_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для удаления пользователя из исключений."""
+    user_id = update.effective_user.id
+    
+    if not is_owner(user_id):
+        await update.message.reply_text("❌ *Эта команда доступна только владельцу*", parse_mode='Markdown')
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ *Укажите ID пользователя:* `/include <ID>`\n\n"
+            "Пример:\n"
+            "`/include 123456789`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        target_user_id = int(context.args[0].strip())
+        
+        if remove_excluded_user(target_user_id):
+            await update.message.reply_text(
+                f"✅ *Пользователь с ID {target_user_id} удален из исключений!*",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text("❌ *Пользователь не найден в исключениях*", parse_mode='Markdown')
+            
+    except ValueError:
+        await update.message.reply_text("❌ *Неверный ID. ID должен быть числом.*", parse_mode='Markdown')
+
+async def excluded_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для просмотра списка исключений."""
+    user_id = update.effective_user.id
+    
+    if not is_owner(user_id):
+        await update.message.reply_text("❌ *Эта команда доступна только владельцу*", parse_mode='Markdown')
+        return
+    
+    excluded_users = get_excluded_users()
+    
+    if not excluded_users:
+        await update.message.reply_text("📭 *Список исключений пуст*", parse_mode='Markdown')
+        return
+    
+    message = "🚫 *Список исключенных пользователей:*\n\n"
+    
+    for i, (user_id, username, reason, date) in enumerate(excluded_users, 1):
+        username_display = f"@{username}" if username else f"ID: {user_id}"
+        date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+        message += f"{i}. {username_display}\n"
+        message += f"   Причина: {reason}\n"
+        message += f"   Дата: {date_str}\n\n"
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+async def collection_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для просмотра статистики сбора сообщений."""
+    user_id = update.effective_user.id
+    
+    if not is_owner(user_id):
+        await update.message.reply_text("❌ *Эта команда доступна только владельцу*", parse_mode='Markdown')
+        return
+    
+    stats = get_saved_stats()
+    
+    if not stats:
+        await update.message.reply_text("❌ *Не удалось получить статистику*", parse_mode='Markdown')
+        return
+    
+    message = "📊 *Статистика сохраненных сообщений*\n\n"
+    message += f"• Всего сообщений: `{stats['total']}`\n"
+    message += f"• Уникальных пользователей: `{stats['unique_users']}`\n"
+    message += f"• Уникальных чатов: `{stats['unique_chats']}`\n"
+    
+    if stats['dates'][0] and stats['dates'][1]:
+        min_date = datetime.strptime(stats['dates'][0], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+        max_date = datetime.strptime(stats['dates'][1], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+        message += f"• Период: `{min_date}` - `{max_date}`\n"
+    
+    if stats['by_type']:
+        message += "\n📁 *По типам:*\n"
+        for msg_type, count in stats['by_type']:
+            type_name = {
+                'text': '📝 Текстовые',
+                'voice': '🎤 Голосовые',
+                'video_note': '🎥 Видеосообщения'
+            }.get(msg_type, msg_type)
+            message += f"  {type_name}: `{count}`\n"
+    
+    message += f"\n💾 *Сбор сообщений:* `{'ВКЛЮЧЕН ✅' if COLLECTION_ENABLED else 'ВЫКЛЮЧЕН ⏸️'}`\n"
+    message += f"🚫 *Исключений:* `{len(EXCLUDED_USERS)}`"
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+# ========== ОБРАБОТЧИКИ КОМАНД (оригинальные) ==========
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start."""
     chat_type = update.effective_chat.type
@@ -407,6 +977,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Для админов в личке показываем дополнительные возможности
     if chat_type == 'private' and is_admin(user_id):
         welcome_text += "• ⚙️ Управление (для админов)\n"
+    
+    # Для владельца показываем управление сбором
+    if chat_type == 'private' and is_owner(user_id):
+        welcome_text += "• 💾 Управление сбором сообщений\n"
     
     await update.message.reply_text(
         welcome_text,
@@ -445,6 +1019,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "`/stats` - Статистика\n"
                 "`/backup` - Создать бэкап\n"
                 "`/cleanup` - Очистка\n\n"
+                "💾 *Команды для сбора сообщений:*\n"
+                "`/collection` - Управление сбором\n"
+                "`/toggle_collection on/off` - Включить/выключить сбор\n"
+                "`/exclude <ID> [причина]` - Добавить исключение\n"
+                "`/include <ID>` - Удалить исключение\n"
+                "`/excluded_list` - Список исключений\n"
+                "`/collection_stats` - Статистика сбора\n\n"
             )
     else:
         help_text += (
@@ -879,6 +1460,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_management_keyboard(user_id)
         )
     
+    elif data == 'collection_management':
+        # Проверяем, что это личное сообщение и пользователь владелец
+        if chat_type != 'private':
+            await safe_edit_message_text(
+                query,
+                "⛔ *Эта функция доступна только в личном чате с ботом*",
+                parse_mode='Markdown'
+            )
+            return
+            
+        if not is_owner(user_id):
+            await safe_edit_message_text(
+                query,
+                "⛔ *Доступ запрещен*\n\n"
+                "Эта функция доступна только владельцу.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        await safe_edit_message_text(
+            query,
+            "💾 *Управление сбором сообщений*\n\n"
+            "Выберите действие:",
+            parse_mode='Markdown',
+            reply_markup=get_collection_management_keyboard()
+        )
+    
     elif data == 'manage_admins':
         if not is_owner(user_id) or chat_type != 'private':
             await safe_edit_message_text(
@@ -962,6 +1570,175 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             username_display = f"@{username}" if username else f"ID: {admin_id}"
             role = "👑 Владелец" if admin_id == OWNER_ID else "👤 Админ"
             message += f"{i}. {username_display} - {role}\n"
+        
+        await safe_edit_message_text(
+            query,
+            message,
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard(chat_type)
+        )
+    
+    elif data == 'enable_collection':
+        if not is_owner(user_id) or chat_type != 'private':
+            await safe_edit_message_text(
+                query,
+                "⛔ *Эта функция доступна только владельцу в личном чате*",
+                parse_mode='Markdown'
+            )
+            return
+        
+        global COLLECTION_ENABLED
+        COLLECTION_ENABLED = True
+        update_setting('collection_enabled', '1')
+        
+        await safe_edit_message_text(
+            query,
+            "✅ *Сбор сообщений включен!*\n\n"
+            "Бот теперь будет сохранять текстовые, голосовые сообщения и видеосообщения.",
+            parse_mode='Markdown',
+            reply_markup=get_collection_management_keyboard()
+        )
+    
+    elif data == 'disable_collection':
+        if not is_owner(user_id) or chat_type != 'private':
+            await safe_edit_message_text(
+                query,
+                "⛔ *Эта функция доступна только владельцу в личном чате*",
+                parse_mode='Markdown'
+            )
+            return
+        
+        global COLLECTION_ENABLED
+        COLLECTION_ENABLED = False
+        update_setting('collection_enabled', '0')
+        
+        await safe_edit_message_text(
+            query,
+            "⏸️ *Сбор сообщений выключен!*\n\n"
+            "Бот больше не будет сохранять сообщения.",
+            parse_mode='Markdown',
+            reply_markup=get_collection_management_keyboard()
+        )
+    
+    elif data == 'add_exclusion':
+        if not is_owner(user_id) or chat_type != 'private':
+            await safe_edit_message_text(
+                query,
+                "⛔ *Эта функция доступна только владельцу в личном чате*",
+                parse_mode='Markdown'
+            )
+            return
+        
+        await safe_edit_message_text(
+            query,
+            "➕ *Добавление исключения*\n\n"
+            "Для добавления пользователя в исключения отправьте команду:\n"
+            "`/exclude <ID> [причина]`\n\n"
+            "Пример:\n"
+            "`/exclude 123456789 спам`\n"
+            "`/exclude 987654321`",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard(chat_type)
+        )
+    
+    elif data == 'remove_exclusion':
+        if not is_owner(user_id) or chat_type != 'private':
+            await safe_edit_message_text(
+                query,
+                "⛔ *Эта функция доступна только владельцу в личном чате*",
+                parse_mode='Markdown'
+            )
+            return
+        
+        await safe_edit_message_text(
+            query,
+            "➖ *Удаление исключения*\n\n"
+            "Для удаления пользователя из исключений отправьте команду:\n"
+            "`/include <ID>`\n\n"
+            "Пример:\n"
+            "`/include 123456789`",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard(chat_type)
+        )
+    
+    elif data == 'list_exclusions':
+        if not is_owner(user_id) or chat_type != 'private':
+            await safe_edit_message_text(
+                query,
+                "⛔ *Эта функция доступна только владельцу в личном чате*",
+                parse_mode='Markdown'
+            )
+            return
+        
+        excluded_users = get_excluded_users()
+        
+        if not excluded_users:
+            await safe_edit_message_text(
+                query,
+                "📭 *Список исключений пуст*",
+                parse_mode='Markdown',
+                reply_markup=get_back_keyboard(chat_type)
+            )
+            return
+        
+        message = "🚫 *Список исключенных пользователей:*\n\n"
+        
+        for i, (user_id, username, reason, date) in enumerate(excluded_users, 1):
+            username_display = f"@{username}" if username else f"ID: {user_id}"
+            date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+            message += f"{i}. {username_display}\n"
+            message += f"   Причина: {reason}\n"
+            message += f"   Дата: {date_str}\n\n"
+        
+        await safe_edit_message_text(
+            query,
+            message,
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard(chat_type)
+        )
+    
+    elif data == 'collection_stats':
+        if not is_owner(user_id) or chat_type != 'private':
+            await safe_edit_message_text(
+                query,
+                "⛔ *Эта функция доступна только владельцу в личном чате*",
+                parse_mode='Markdown'
+            )
+            return
+        
+        stats = get_saved_stats()
+        
+        if not stats:
+            await safe_edit_message_text(
+                query,
+                "❌ *Не удалось получить статистику*",
+                parse_mode='Markdown',
+                reply_markup=get_back_keyboard(chat_type)
+            )
+            return
+        
+        message = "📊 *Статистика сохраненных сообщений*\n\n"
+        message += f"• Всего сообщений: `{stats['total']}`\n"
+        message += f"• Уникальных пользователей: `{stats['unique_users']}`\n"
+        message += f"• Уникальных чатов: `{stats['unique_chats']}`\n"
+        
+        if stats['dates'][0] and stats['dates'][1]:
+            min_date = datetime.strptime(stats['dates'][0], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+            max_date = datetime.strptime(stats['dates'][1], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+            message += f"• Период: `{min_date}` - `{max_date}`\n"
+        
+        if stats['by_type']:
+            message += "\n📁 *По типам:*\n"
+            for msg_type, count in stats['by_type']:
+                type_name = {
+                    'text': '📝 Текстовые',
+                    'voice': '🎤 Голосовые',
+                    'video_note': '🎥 Видеосообщения'
+                }.get(msg_type, msg_type)
+                message += f"  {type_name}: `{count}`\n"
+        
+        message += f"\n💾 *Сбор сообщений:* `{'ВКЛЮЧЕН ✅' if COLLECTION_ENABLED else 'ВЫКЛЮЧЕН ⏸️'}`\n"
+        message += f"🚫 *Исключений:* `{len(EXCLUDED_USERS)}`"
         
         await safe_edit_message_text(
             query,
@@ -1128,7 +1905,12 @@ async def stats_callback(query: CallbackQuery, context: ContextTypes.DEFAULT_TYP
             for adder_id, count in top_adders:
                 message += f"  👤 `{adder_id}`: `{count}` записей\n"
         
-        await safe_edit_message_text(message, parse_mode='Markdown', reply_markup=get_back_keyboard(chat_type))
+        await safe_edit_message_text(
+            query,
+            message,
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard(chat_type)
+        )
         
     except Exception as e:
         logger.error(f"Ошибка статистики: {e}")
@@ -1266,9 +2048,18 @@ def main():
     """Основная функция запуска бота."""
     # Инициализация БД
     init_db()
+    init_save_db()
+    
+    # Загружаем настройки
+    global COLLECTION_ENABLED, EXCLUDED_USERS, LOG_CHAT_ID
+    COLLECTION_ENABLED, EXCLUDED_USERS, LOG_CHAT_ID = load_settings()
     
     # Очистка старых записей
     cleaned = cleanup_database()
+    
+    # Создаем папки
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    os.makedirs(BACKUP_DIR, exist_ok=True)
     
     # Создаем приложение
     application = Application.builder().token(TOKEN).build()
@@ -1281,19 +2072,41 @@ def main():
     application.add_handler(CommandHandler("removeadmin", removeadmin_command))
     application.add_handler(CommandHandler("listadmins", listadmins_command))
     
-    # Обработчики сообщений
+    # Команды для управления сбором сообщений
+    application.add_handler(CommandHandler("collection", collection_command))
+    application.add_handler(CommandHandler("toggle_collection", toggle_collection_command))
+    application.add_handler(CommandHandler("exclude", exclude_user_command))
+    application.add_handler(CommandHandler("include", include_user_command))
+    application.add_handler(CommandHandler("excluded_list", excluded_list_command))
+    application.add_handler(CommandHandler("collection_stats", collection_stats_command))
+    
+    # Обработчики сохранения сообщений
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
+    application.add_handler(MessageHandler(filters.VIDEO_NOTE, handle_video_note))
+    
+    # Игнорируем стикеры, гифки, файлы и т.д.
+    application.add_handler(MessageHandler(
+        filters.STICKER | filters.ANIMATION | filters.Document.ALL | 
+        filters.PHOTO | filters.AUDIO | filters.VIDEO,
+        handle_stickers_and_other
+    ))
+    
+    # Обработчики сообщений для информационного бота
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
     # Обработчики кнопок
-    application.add_handler(CallbackQueryHandler(button_handler, pattern='^(all_info|management|manage_admins|add_admin_by_id|remove_admin_by_id|list_admins|back_to_management|create_backup|import_db|stats|cleanup|back_to_main)$'))
+    application.add_handler(CallbackQueryHandler(button_handler, pattern='^(all_info|management|collection_management|manage_admins|add_admin_by_id|remove_admin_by_id|list_admins|enable_collection|disable_collection|add_exclusion|remove_exclusion|list_exclusions|collection_stats|back_to_management|create_backup|import_db|stats|cleanup|back_to_main)$'))
     application.add_handler(CallbackQueryHandler(page_handler, pattern='^page_'))
     
     # Запуск бота
     print("=" * 50)
     print("ИНФОРМАЦИОННЫЙ БОТ ЗАПУЩЕН")
     print("=" * 50)
-    print(f" Владелец: {OWNER_ID}")
+    print(f"👑 Владелец: {OWNER_ID}")
+    print(f"💾 Сбор сообщений: {'ВКЛЮЧЕН ✅' if COLLECTION_ENABLED else 'ВЫКЛЮЧЕН ⏸️'}")
+    print(f"🚫 Исключений: {len(EXCLUDED_USERS)}")
     print(f"🧹 Очищено записей: {cleaned}")
     print("=" * 50)
     print("📋 Основные команды:")
@@ -1309,10 +2122,21 @@ def main():
     print("• /addadmin <ID> - Добавить админа по ID")
     print("• /removeadmin <ID> - Удалить админа по ID")
     print("• /listadmins - Список админов")
+    print("• /collection - Управление сбором сообщений")
+    print("• /toggle_collection on/off - Включить/выключить сбор")
+    print("• /exclude <ID> [причина] - Добавить исключение")
+    print("• /include <ID> - Удалить исключение")
+    print("• /excluded_list - Список исключений")
+    print("• /collection_stats - Статистика сбора")
+    print("=" * 50)
+    print("💾 Сохраняемые типы сообщений:")
+    print("✅ Текстовые сообщения")
+    print("✅ Голосовые сообщения")
+    print("✅ Видеосообщения (кружки)")
+    print("❌ Стикеры, гифки, файлы, фото, музыка игнорируются")
     print("=" * 50)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
-
