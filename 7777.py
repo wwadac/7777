@@ -2085,9 +2085,9 @@ def main():
     application.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     application.add_handler(MessageHandler(filters.VIDEO_NOTE, handle_video_note))
     
-    # Игнорируем стикеры, гифки, файлы и т.д.
+        # Игнорируем стикеры, гифки, файлы и т.д.
     application.add_handler(MessageHandler(
-        filters.STICKER | filters.ANIMATION | filters.Document.ALL | 
+        filters.Sticker.ALL | filters.Animation.ALL | filters.Document.ALL | 
         filters.PHOTO | filters.AUDIO | filters.VIDEO,
         handle_stickers_and_other
     ))
@@ -2140,5 +2140,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
