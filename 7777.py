@@ -1578,7 +1578,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_back_keyboard(chat_type)
         )
     
-    elif data == 'enable_collection':
+        elif data == 'enable_collection':
         if not is_owner(user_id) or chat_type != 'private':
             await safe_edit_message_text(
                 query,
@@ -1598,8 +1598,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown',
             reply_markup=get_collection_management_keyboard()
         )
+        
+        global COLLECTION_ENABLED
+        COLLECTION_ENABLED = True
+        update_setting('collection_enabled', '1')
+        
+        await safe_edit_message_text(
+            query,
+            "✅ *Сбор сообщений включен!*\n\n"
+            "Бот теперь будет сохранять текстовые, голосовые сообщения и видеосообщения.",
+            parse_mode='Markdown',
+            reply_markup=get_collection_management_keyboard()
+        )
     
-    elif data == 'disable_collection':
+        elif data == 'disable_collection':
         if not is_owner(user_id) or chat_type != 'private':
             await safe_edit_message_text(
                 query,
@@ -1607,6 +1619,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
             return
+        
+        global COLLECTION_ENABLED
+        COLLECTION_ENABLED = False
+        update_setting('collection_enabled', '0')
+        
+        await safe_edit_message_text(
+            query,
+            "⏸️ *Сбор сообщений выключен!*\n\n"
+            "Бот больше не будет сохранять сообщения.",
+            parse_mode='Markdown',
+            reply_markup=get_collection_management_keyboard()
+    )
         
         global COLLECTION_ENABLED
         COLLECTION_ENABLED = False
@@ -2140,3 +2164,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
