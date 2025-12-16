@@ -1418,6 +1418,7 @@ async def handle_delete_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ========== ОБРАБОТЧИКИ КНОПОК ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик нажатий на кнопки."""
+    global COLLECTION_ENABLED, EXCLUDED_USERS
     query = update.callback_query
     await query.answer()
     
@@ -2164,4 +2165,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
