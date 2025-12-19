@@ -17,7 +17,7 @@ from telegram.ext import (
 from telegram.error import BadRequest
 
 # ========== КОНФИГУРАЦИЯ ==========
-TOKEN = "8534057742:AAHWEBn4Z2FjKS5E9yEuaiEVoUBmKs5p1sM"
+TOKEN = "8534057742:AAE1EDuHUmBXo0vxsXR5XorlWgeXe3-4L98"
 OWNER_ID = 6893832048  # ID владельца
 DB_FILE = "info.db"
 BACKUP_DIR = "backups"
@@ -1315,4 +1315,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
