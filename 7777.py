@@ -1,316 +1,946 @@
-import os
-import logging
-from pathlib import Path
+
+
 import asyncio
-from datetime import datetime
+import logging
+import sqlite3
+import json
+from datetime import datetime, timedelta
+from typing import Optional
 
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import Message
-from aiogram.filters import Command
-from aiogram.utils.markdown import hbold
-from dotenv import load_dotenv
-import ffmpeg
-import speech_recognition as sr
-from pydub import AudioSegment
-import subprocess
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import (
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    CallbackQuery, Message
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# Загрузка переменных окружения
-load_dotenv()
+# ══════════════════════════════════════════════
+# ⚙️ КОНФИГУРАЦИЯ — ЗАПОЛНИ СВОИ ДАННЫЕ
+# ══════════════════════════════════════════════
 
-# Настройка логирования
+BOT_TOKEN = "8602705022:AAE7_Q9H42YfXE1aFF2kHuGV4-dnRXrk_Bo"
+
+# ID администраторов (можно несколько)
+ADMIN_IDS = [6893832048]  # Замени на свои Telegram ID
+
+# Каналы для обязательной подписки
+# Формат: {"title": "Название", "url": "https://t.me/resfsfsef", "id": -1003876663887}
+REQUIRED_CHANNELS = [
+    {
+        "title": "📢 Наш канал",
+        "url": "https://t.me/resfsfsef",
+        "id": -1003876663887  # ID канала (с минусом)
+    },
+    # Добавь ещё каналы при необходимости:
+    # {
+    #     "title": "💎 VIP канал",
+    #     "url": "https://t.me/your_vip_channel",
+    #     "id": -1009876543210
+    # },
+]
+
+# ══════════════════════════════════════════════
+# 📊 БАЗА ДАННЫХ
+# ══════════════════════════════════════════════
+
+def init_db():
+    conn = sqlite3.connect("bot_database.db")
+    c = conn.cursor()
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id     INTEGER PRIMARY KEY,
+            username    TEXT,
+            full_name   TEXT,
+            joined_at   TEXT,
+            is_banned   INTEGER DEFAULT 0,
+            mute_until  TEXT,
+            ref_by      INTEGER
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS channels (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            title   TEXT,
+            url     TEXT,
+            chan_id INTEGER UNIQUE
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS broadcasts (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            text        TEXT,
+            buttons     TEXT,
+            sent_at     TEXT,
+            sent_count  INTEGER DEFAULT 0
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+def db():
+    return sqlite3.connect("bot_database.db")
+
+def add_user(user_id, username, full_name, ref_by=None):
+    with db() as conn:
+        conn.execute("""
+            INSERT OR IGNORE INTO users (user_id, username, full_name, joined_at, ref_by)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, username, full_name, datetime.now().isoformat(), ref_by))
+
+def get_user(user_id):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if row:
+            return {
+                "user_id": row[0], "username": row[1], "full_name": row[2],
+                "joined_at": row[3], "is_banned": row[4], "mute_until": row[5],
+                "ref_by": row[6]
+            }
+    return None
+
+def get_all_users():
+    with db() as conn:
+        return conn.execute("SELECT user_id FROM users WHERE is_banned=0").fetchall()
+
+def get_stats():
+    with db() as conn:
+        total  = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        banned = conn.execute("SELECT COUNT(*) FROM users WHERE is_banned=1").fetchone()[0]
+        today  = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE joined_at >= ?",
+            ((datetime.now() - timedelta(days=1)).isoformat(),)
+        ).fetchone()[0]
+        return {"total": total, "banned": banned, "today": today}
+
+def ban_user(user_id):
+    with db() as conn:
+        conn.execute("UPDATE users SET is_banned=1 WHERE user_id=?", (user_id,))
+
+def unban_user(user_id):
+    with db() as conn:
+        conn.execute("UPDATE users SET is_banned=0 WHERE user_id=?", (user_id,))
+
+def mute_user(user_id, minutes):
+    until = (datetime.now() + timedelta(minutes=minutes)).isoformat()
+    with db() as conn:
+        conn.execute("UPDATE users SET mute_until=? WHERE user_id=?", (until, user_id))
+
+def unmute_user(user_id):
+    with db() as conn:
+        conn.execute("UPDATE users SET mute_until=NULL WHERE user_id=?", (user_id,))
+
+def is_muted(user_id):
+    with db() as conn:
+        row = conn.execute("SELECT mute_until FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if row and row[0]:
+            return datetime.fromisoformat(row[0]) > datetime.now()
+    return False
+
+def get_channels():
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM channels").fetchall()
+        return [{"id": r[0], "title": r[1], "url": r[2], "chan_id": r[3]} for r in rows]
+
+def add_channel(title, url, chan_id):
+    with db() as conn:
+        conn.execute("INSERT OR REPLACE INTO channels (title, url, chan_id) VALUES (?,?,?)",
+                     (title, url, chan_id))
+
+def remove_channel(chan_id):
+    with db() as conn:
+        conn.execute("DELETE FROM channels WHERE id=?", (chan_id,))
+
+def save_broadcast(text, buttons, sent_count):
+    with db() as conn:
+        conn.execute("INSERT INTO broadcasts (text,buttons,sent_at,sent_count) VALUES (?,?,?,?)",
+                     (text, json.dumps(buttons), datetime.now().isoformat(), sent_count))
+
+# ══════════════════════════════════════════════
+# 🎛️ FSM СОСТОЯНИЯ
+# ══════════════════════════════════════════════
+
+class AdminStates(StatesGroup):
+    # Рассылка
+    broadcast_text    = State()
+    broadcast_buttons = State()
+    broadcast_confirm = State()
+
+    # Добавление канала
+    add_chan_title = State()
+    add_chan_url   = State()
+    add_chan_id    = State()
+
+    # Бан / Мут
+    ban_user_id   = State()
+    unban_user_id = State()
+    mute_user_id  = State()
+    mute_duration = State()
+    unmute_user_id = State()
+
+    # Проверка юзера
+    check_user_id = State()
+
+# ══════════════════════════════════════════════
+# 🔑 ИНИЦИАЛИЗАЦИЯ
+# ══════════════════════════════════════════════
+
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+init_db()
 
-# Токен бота
-BOT_TOKEN = os.getenv('BOT_TOKEN')
+# Загружаем каналы из конфига в БД при первом запуске
+for ch in REQUIRED_CHANNELS:
+    add_channel(ch["title"], ch["url"], ch["id"])
 
-# Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp  = Dispatcher(storage=MemoryStorage())
 
-# Создание директорий для временных файлов
-TEMP_DIR = Path("temp")
-TEMP_DIR.mkdir(exist_ok=True)
-VIDEO_DIR = TEMP_DIR / "videos"
-AUDIO_DIR = TEMP_DIR / "audio"
-VIDEO_DIR.mkdir(exist_ok=True)
-AUDIO_DIR.mkdir(exist_ok=True)
+# ══════════════════════════════════════════════
+# 🛡️ ХЕЛПЕРЫ
+# ══════════════════════════════════════════════
 
-# Максимальный размер файла (20 MB)
-MAX_FILE_SIZE = 20 * 1024 * 1024
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
 
-@dp.message(Command("start"))
-async def start_command(message: Message):
-    """Обработчик команды /start"""
-    welcome_text = (
-        f"Привет, {hbold(message.from_user.full_name)}! 👋\n\n"
-        "Я бот с двумя функциями:\n\n"
-        "1️⃣ 📹 Конвертирую видео в кружок (видеосообщение)\n"
-        "   - Просто отправь мне видео\n"
-        "   - Видео должно быть не больше 20 МБ\n"
-        "   - Я обрежу его до квадрата и сделаю кружок\n\n"
-        "2️⃣ 🎤 Превращаю голосовые сообщения в текст\n"
-        "   - Отправь мне голосовое сообщение\n"
-        "   - Поддерживаются разные языки\n"
-        "   - Я распознаю речь и отправлю текст\n\n"
-        "Просто отправь видео или голосовое сообщение!"
-    )
-    await message.answer(welcome_text, parse_mode="HTML")
-
-@dp.message(Command("help"))
-async def help_command(message: Message):
-    """Обработчик команды /help"""
-    help_text = (
-        "📋 Инструкция по использованию:\n\n"
-        "🎬 Для видео:\n"
-        "1. Отправь видео файл (до 20 МБ)\n"
-        "2. Я обработаю его и сделаю кружок\n"
-        "3. Отправлю тебе видеосообщение\n\n"
-        "🎤 Для голосовых:\n"
-        "1. Отправь голосовое сообщение\n"
-        "2. Я распознаю речь\n"
-        "3. Отправлю тебе текст\n\n"
-        "Команды:\n"
-        "/start - Начать работу\n"
-        "/help - Показать помощь"
-    )
-    await message.answer(help_text)
-
-async def convert_to_circle(input_path: Path, output_path: Path) -> bool:
-    """
-    Конвертирует обычное видео в кружок (квадратное видео с круглой маской)
-    """
-    try:
-        # Получаем информацию о видео
-        probe = ffmpeg.probe(str(input_path))
-        video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
-        
-        if video_stream is None:
-            return False
-        
-        width = int(video_stream['width'])
-        height = int(video_stream['height'])
-        
-        # Определяем размер для квадрата (минимальная сторона)
-        size = min(width, height)
-        
-        # Координаты для обрезки
-        x = (width - size) // 2
-        y = (height - size) // 2
-        
-        # Создаем сложный фильтр для создания кружка
-        # 1. Обрезаем до квадрата
-        # 2. Создаем круглую маску
-        # 3. Применяем маску к видео
-        filter_complex = (
-            f"[0:v]crop={size}:{size}:{x}:{y}[cropped];"
-            f"[cropped]format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(gt(pow(X-({size}/2),2)+pow(Y-({size}/2),2),pow({size}/2,2)),0,255)'[circlevideo]"
-        )
-        
-        # Применяем фильтр
-        process = (
-            ffmpeg
-            .input(str(input_path))
-            .output(
-                str(output_path),
-                vcodec='libx264',
-                acodec='aac',
-                video_bitrate='1000k',
-                audio_bitrate='128k',
-                **{'filter_complex': filter_complex, 'map': '[circlevideo]'}
-            )
-            .overwrite_output()
-            .run_async(pipe_stdout=True, pipe_stderr=True)
-        )
-        
-        # Ждем завершения
-        stdout, stderr = process.communicate()
-        
-        if process.returncode != 0:
-            logger.error(f"FFmpeg error: {stderr.decode()}")
-            return False
-            
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error converting video: {e}")
-        return False
-
-async def speech_to_text(audio_path: Path) -> str:
-    """
-    Преобразует аудио в текст
-    """
-    try:
-        # Инициализируем распознаватель
-        recognizer = sr.Recognizer()
-        
-        # Конвертируем аудио в WAV формат для лучшего распознавания
-        wav_path = audio_path.with_suffix('.wav')
-        
-        # Используем ffmpeg для конвертации
-        stream = ffmpeg.input(str(audio_path))
-        stream = ffmpeg.output(stream, str(wav_path), acodec='pcm_s16le', ac=1, ar='16000')
-        ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
-        
-        # Загружаем аудио для распознавания
-        with sr.AudioFile(str(wav_path)) as source:
-            audio_data = recognizer.record(source)
-            
-            # Пытаемся распознать на разных языках
-            languages = ['ru-RU', 'uk-UA', 'en-US', 'de-DE', 'fr-FR']
-            text = None
-            
-            for lang in languages:
-                try:
-                    text = recognizer.recognize_google(audio_data, language=lang)
-                    logger.info(f"Recognized with language {lang}: {text}")
-                    break
-                except sr.UnknownValueError:
-                    continue
-                except sr.RequestError as e:
-                    logger.error(f"Recognition service error: {e}")
-                    continue
-            
-            if text:
-                return text
-            else:
-                return "Не удалось распознать речь. Попробуйте говорить четче или на другом языке."
-                
-    except Exception as e:
-        logger.error(f"Error in speech recognition: {e}")
-        return f"Ошибка при распознавании: {str(e)}"
-    finally:
-        # Удаляем временный WAV файл
-        if 'wav_path' in locals() and wav_path.exists():
-            wav_path.unlink()
-
-def cleanup_temp_files(*paths):
-    """Удаляет временные файлы"""
-    for path in paths:
+async def check_subscription(user_id: int) -> list:
+    """Возвращает список каналов, на которые юзер НЕ подписан"""
+    not_subscribed = []
+    channels = get_channels()
+    for ch in channels:
         try:
-            if path and Path(path).exists():
-                Path(path).unlink()
-        except Exception as e:
-            logger.error(f"Error deleting file {path}: {e}")
+            member = await bot.get_chat_member(ch["chan_id"], user_id)
+            if member.status in ("left", "kicked", "banned"):
+                not_subscribed.append(ch)
+        except Exception:
+            not_subscribed.append(ch)
+    return not_subscribed
 
-@dp.message(lambda message: message.video or message.document)
-async def handle_video(message: Message):
-    """
-    Обработчик видеофайлов
-    """
-    try:
-        # Определяем тип файла и получаем информацию
-        if message.video:
-            file_info = message.video
-            file_name = f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-        else:
-            # Проверяем, что это видео файл
-            if not message.document.mime_type or not message.document.mime_type.startswith('video/'):
-                await message.reply("Пожалуйста, отправьте видеофайл.")
-                return
-            file_info = message.document
-            file_name = message.document.file_name or f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-        
-        # Проверяем размер файла
-        if file_info.file_size > MAX_FILE_SIZE:
-            await message.reply("❌ Файл слишком большой. Максимальный размер: 20 МБ")
-            return
-        
-        # Отправляем сообщение о начале обработки
-        processing_msg = await message.reply("🔄 Обрабатываю видео... Это может занять некоторое время.")
-        
-        # Скачиваем видео
-        file_id = file_info.file_id
-        file = await bot.get_file(file_id)
-        
-        input_path = VIDEO_DIR / f"input_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-        await bot.download_file(file.file_path, destination=input_path)
-        
-        # Конвертируем в кружок
-        output_path = VIDEO_DIR / f"circle_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-        
-        success = await convert_to_circle(input_path, output_path)
-        
-        if success and output_path.exists():
-            # Отправляем видеосообщение
-            with open(output_path, 'rb') as video_file:
-                await message.reply_video_note(
-                    video_note=types.BufferedInputFile(
-                        video_file.read(),
-                        filename="circle.mp4"
-                    )
-                )
-            
-            await processing_msg.edit_text("✅ Готово! Видео преобразовано в кружок.")
-        else:
-            await processing_msg.edit_text("❌ Не удалось обработать видео. Возможно, файл поврежден.")
-        
-        # Удаляем временные файлы
-        cleanup_temp_files(input_path, output_path)
-        
-    except Exception as e:
-        logger.error(f"Error handling video: {e}")
-        await message.reply(f"❌ Произошла ошибка: {str(e)}")
+def sub_keyboard(missing: list) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for ch in missing:
+        kb.row(InlineKeyboardButton(text=f"📢 {ch['title']}", url=ch["url"]))
+    kb.row(InlineKeyboardButton(text="✅ Я подписался!", callback_data="check_sub"))
+    return kb.as_markup()
 
-@dp.message(lambda message: message.voice)
-async def handle_voice(message: Message):
-    """
-    Обработчик голосовых сообщений
-    """
+# ══════════════════════════════════════════════
+# 🏠 ГЛАВНОЕ МЕНЮ
+# ══════════════════════════════════════════════
+
+def main_menu(user_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if is_admin(user_id):
+        kb.row(InlineKeyboardButton(text="⚙️ Админ панель", callback_data="admin_panel"))
+    kb.row(InlineKeyboardButton(text="👤 Мой профиль", callback_data="my_profile"))
+    kb.row(InlineKeyboardButton(text="ℹ️ О боте", callback_data="about"))
+    return kb.as_markup()
+
+WELCOME_TEXT = """
+✨ <b>Добро пожаловать!</b>
+
+Рады видеть тебя здесь 🎉
+
+Используй меню ниже для навигации.
+
+<i>Еcли стαтγc kлиентα был от монет c ρ℮φeραлοв, тο пρи вывoд℮ oн мoжет πρoπаcть (koнвертация в 💠 сохρанит)
+қγρс  1 мoн℮тα = 2 кристαллα 💠</i>
+"""
+
+# ══════════════════════════════════════════════
+# 📬 /start
+# ══════════════════════════════════════════════
+
+@dp.message(CommandStart())
+async def cmd_start(message: Message):
+    user = message.from_user
+    args = message.text.split()
+    ref_by = int(args[1]) if len(args) > 1 and args[1].isdigit() else None
+
+    add_user(user.id, user.username, user.full_name, ref_by)
+
+    # Проверка бана
+    u = get_user(user.id)
+    if u and u["is_banned"]:
+        await message.answer("🚫 Вы заблокированы в этом боте.")
+        return
+
+    # Проверка подписки
+    missing = await check_subscription(user.id)
+    if missing:
+        await message.answer(
+            "🔔 <b>Для использования бота необходимо подписаться на наши каналы:</b>\n\n"
+            "После подписки нажмите <b>«✅ Я подписался!»</b>",
+            reply_markup=sub_keyboard(missing),
+            parse_mode="HTML"
+        )
+        return
+
+    await message.answer(WELCOME_TEXT, reply_markup=main_menu(user.id), parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "check_sub")
+async def check_sub_callback(call: CallbackQuery):
+    missing = await check_subscription(call.from_user.id)
+    if missing:
+        await call.answer("❌ Вы ещё не подписались на все каналы!", show_alert=True)
+        await call.message.edit_reply_markup(reply_markup=sub_keyboard(missing))
+    else:
+        await call.message.edit_text(
+            WELCOME_TEXT,
+            reply_markup=main_menu(call.from_user.id),
+            parse_mode="HTML"
+        )
+        await call.answer("✅ Отлично! Добро пожаловать!")
+
+
+@dp.callback_query(F.data == "my_profile")
+async def my_profile(call: CallbackQuery):
+    u = get_user(call.from_user.id)
+    if not u:
+        await call.answer("Профиль не найден", show_alert=True)
+        return
+    muted = is_muted(call.from_user.id)
+    text = (
+        f"👤 <b>Ваш профиль</b>\n\n"
+        f"🆔 ID: <code>{u['user_id']}</code>\n"
+        f"📛 Имя: {u['full_name']}\n"
+        f"🔖 Username: @{u['username'] or '—'}\n"
+        f"📅 Регистрация: {u['joined_at'][:10]}\n"
+        f"🔇 Статус: {'🔇 Замучен' if muted else '✅ Активен'}\n"
+    )
+    if u.get("ref_by"):
+        text += f"👥 Приглашён: <code>{u['ref_by']}</code>\n"
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🔗 Реферальная ссылка", callback_data="ref_link"))
+    kb.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu"))
+    await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "ref_link")
+async def ref_link(call: CallbackQuery):
+    link = f"https://t.me/{(await bot.get_me()).username}?start={call.from_user.id}"
+    await call.message.answer(f"🔗 Ваша реферальная ссылка:\n<code>{link}</code>", parse_mode="HTML")
+    await call.answer()
+
+
+@dp.callback_query(F.data == "about")
+async def about(call: CallbackQuery):
+    text = (
+        "ℹ️ <b>О боте</b>\n\n"
+        "Этот бот создан для управления сообществом.\n\n"
+        "<i>Еcли стαтγc kлиентα был от монет c ρ℮φeραлοв, тο пρи вывoд℮ oн мoжет πρoπаcть (koнвертация в 💠 сохρανит)\n"
+        "қγρс  1 мoн℮тα = 2 кристαллα 💠</i>"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu"))
+    await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "main_menu")
+async def go_main_menu(call: CallbackQuery):
+    await call.message.edit_text(WELCOME_TEXT, reply_markup=main_menu(call.from_user.id), parse_mode="HTML")
+
+# ══════════════════════════════════════════════
+# 👑 АДМИН ПАНЕЛЬ
+# ══════════════════════════════════════════════
+
+def admin_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
+        InlineKeyboardButton(text="📢 Рассылка",   callback_data="admin_broadcast")
+    )
+    kb.row(
+        InlineKeyboardButton(text="🚫 Бан",         callback_data="admin_ban"),
+        InlineKeyboardButton(text="✅ Разбан",       callback_data="admin_unban")
+    )
+    kb.row(
+        InlineKeyboardButton(text="🔇 Мут",         callback_data="admin_mute"),
+        InlineKeyboardButton(text="🔊 Размут",       callback_data="admin_unmute")
+    )
+    kb.row(
+        InlineKeyboardButton(text="📺 Каналы",       callback_data="admin_channels"),
+        InlineKeyboardButton(text="🔍 Проверить юзера", callback_data="admin_check_user")
+    )
+    kb.row(InlineKeyboardButton(text="🏠 В главное меню", callback_data="main_menu"))
+    return kb.as_markup()
+
+
+@dp.callback_query(F.data == "admin_panel")
+async def admin_panel(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("🚫 Нет доступа!", show_alert=True)
+        return
+    stats = get_stats()
+    text = (
+        "👑 <b>Панель администратора</b>\n\n"
+        f"👥 Пользователей: <b>{stats['total']}</b>\n"
+        f"🚫 Заблокировано: <b>{stats['banned']}</b>\n"
+        f"🆕 За сутки: <b>{stats['today']}</b>\n\n"
+        "Выберите действие:"
+    )
+    await call.message.edit_text(text, reply_markup=admin_keyboard(), parse_mode="HTML")
+
+
+# ── Статистика ──────────────────────────────
+
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer("🚫", show_alert=True)
+    stats = get_stats()
+    channels = get_channels()
+    ch_list = "\n".join([f"  • {c['title']}" for c in channels]) or "  — нет каналов"
+    text = (
+        "📊 <b>Статистика бота</b>\n\n"
+        f"👥 Всего пользователей: <b>{stats['total']}</b>\n"
+        f"🚫 Заблокированных: <b>{stats['banned']}</b>\n"
+        f"🆕 Новых за 24ч: <b>{stats['today']}</b>\n"
+        f"📺 Подключённых каналов: <b>{len(channels)}</b>\n\n"
+        f"<b>Каналы:</b>\n{ch_list}"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel"))
+    await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+# ── Управление каналами ──────────────────────
+
+@dp.callback_query(F.data == "admin_channels")
+async def admin_channels(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer("🚫", show_alert=True)
+    channels = get_channels()
+    kb = InlineKeyboardBuilder()
+    for ch in channels:
+        kb.row(InlineKeyboardButton(text=f"❌ Удалить «{ch['title']}»", callback_data=f"del_chan_{ch['id']}"))
+    kb.row(InlineKeyboardButton(text="➕ Добавить канал", callback_data="add_channel"))
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel"))
+    text = "📺 <b>Управление каналами</b>\n\nПодключённые каналы:"
+    if not channels:
+        text += "\n\n<i>Каналов нет. Добавьте первый!</i>"
+    await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("del_chan_"))
+async def del_channel(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer("🚫", show_alert=True)
+    chan_db_id = int(call.data.split("_")[2])
+    remove_channel(chan_db_id)
+    await call.answer("✅ Канал удалён!")
+    await admin_channels(call)
+
+
+@dp.callback_query(F.data == "add_channel")
+async def add_channel_start(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        return await call.answer("🚫", show_alert=True)
+    await state.set_state(AdminStates.add_chan_title)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_channels"))
+    await call.message.edit_text(
+        "📺 <b>Добавление канала</b>\n\nВведите <b>название</b> канала:",
+        reply_markup=kb.as_markup(), parse_mode="HTML"
+    )
+
+
+@dp.message(AdminStates.add_chan_title)
+async def add_channel_title(message: Message, state: FSMContext):
+    await state.update_data(title=message.text)
+    await state.set_state(AdminStates.add_chan_url)
+    await message.answer("🔗 Введите <b>ссылку</b> на канал (https://t.me/...):", parse_mode="HTML")
+
+
+@dp.message(AdminStates.add_chan_url)
+async def add_channel_url(message: Message, state: FSMContext):
+    await state.update_data(url=message.text)
+    await state.set_state(AdminStates.add_chan_id)
+    await message.answer(
+        "🆔 Введите <b>ID канала</b> (например: -1001234567890)\n\n"
+        "<i>Как узнать ID? Перешли любое сообщение из канала боту @username_to_id_bot</i>",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(AdminStates.add_chan_id)
+async def add_channel_id(message: Message, state: FSMContext):
+    if not message.text.lstrip("-").isdigit():
+        await message.answer("❌ Неверный формат ID. Введите числовой ID:")
+        return
+    data = await state.get_data()
+    add_channel(data["title"], data["url"], int(message.text))
+    await state.clear()
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="📺 К каналам", callback_data="admin_channels"))
+    kb.row(InlineKeyboardButton(text="👑 Админ панель", callback_data="admin_panel"))
+    await message.answer(
+        f"✅ Канал <b>{data['title']}</b> успешно добавлен!",
+        reply_markup=kb.as_markup(), parse_mode="HTML"
+    )
+
+
+# ── Бан ────────────────────────────────────
+
+@dp.callback_query(F.data == "admin_ban")
+async def admin_ban_start(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        return await call.answer("🚫", show_alert=True)
+    await state.set_state(AdminStates.ban_user_id)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel"))
+    await call.message.edit_text(
+        "🚫 <b>Бан пользователя</b>\n\nВведите <b>ID</b> пользователя:",
+        reply_markup=kb.as_markup(), parse_mode="HTML"
+    )
+
+
+@dp.message(AdminStates.ban_user_id)
+async def do_ban(message: Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("❌ Введите числовой ID:")
+        return
+    uid = int(message.text)
+    ban_user(uid)
+    await state.clear()
     try:
-        voice = message.voice
-        
-        # Проверяем размер (голосовые обычно маленькие)
-        if voice.file_size > MAX_FILE_SIZE:
-            await message.reply("❌ Голосовое сообщение слишком большое.")
-            return
-        
-        # Отправляем сообщение о начале обработки
-        processing_msg = await message.reply("🔄 Распознаю голосовое сообщение...")
-        
-        # Скачиваем голосовое сообщение
-        file_id = voice.file_id
-        file = await bot.get_file(file_id)
-        
-        # Определяем расширение (Telegram использует .oga)
-        input_path = AUDIO_DIR / f"voice_{datetime.now().strftime('%Y%m%d_%H%M%S')}.oga"
-        await bot.download_file(file.file_path, destination=input_path)
-        
-        # Распознаем речь
-        text = await speech_to_text(input_path)
-        
-        # Отправляем результат
-        await processing_msg.delete()
-        
-        response = f"📝 Распознанный текст:\n\n{text}"
-        
-        # Разбиваем длинные сообщения
-        if len(response) > 4096:
-            for x in range(0, len(response), 4096):
-                await message.reply(response[x:x+4096])
-        else:
-            await message.reply(response)
-        
-        # Удаляем временный файл
-        cleanup_temp_files(input_path)
-        
-    except Exception as e:
-        logger.error(f"Error handling voice: {e}")
-        await message.reply(f"❌ Произошла ошибка: {str(e)}")
+        await bot.send_message(uid, "🚫 Вы были заблокированы администратором.")
+    except Exception:
+        pass
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="👑 Админ панель", callback_data="admin_panel"))
+    await message.answer(
+        f"✅ Пользователь <code>{uid}</code> заблокирован.",
+        reply_markup=kb.as_markup(), parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data == "admin_unban")
+async def admin_unban_start(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        return await call.answer("🚫", show_alert=True)
+    await state.set_state(AdminStates.unban_user_id)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel"))
+    await call.message.edit_text(
+        "✅ <b>Разбан пользователя</b>\n\nВведите <b>ID</b> пользователя:",
+        reply_markup=kb.as_markup(), parse_mode="HTML"
+    )
+
+
+@dp.message(AdminStates.unban_user_id)
+async def do_unban(message: Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("❌ Введите числовой ID:")
+        return
+    uid = int(message.text)
+    unban_user(uid)
+    await state.clear()
+    try:
+        await bot.send_message(uid, "✅ Ваша блокировка снята! Добро пожаловать обратно.")
+    except Exception:
+        pass
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="👑 Админ панель", callback_data="admin_panel"))
+    await message.answer(
+        f"✅ Пользователь <code>{uid}</code> разблокирован.",
+        reply_markup=kb.as_markup(), parse_mode="HTML"
+    )
+
+
+# ── Мут ────────────────────────────────────
+
+@dp.callback_query(F.data == "admin_mute")
+async def admin_mute_start(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        return await call.answer("🚫", show_alert=True)
+    await state.set_state(AdminStates.mute_user_id)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel"))
+    await call.message.edit_text(
+        "🔇 <b>Мут пользователя</b>\n\nВведите <b>ID</b> пользователя:",
+        reply_markup=kb.as_markup(), parse_mode="HTML"
+    )
+
+
+@dp.message(AdminStates.mute_user_id)
+async def mute_get_id(message: Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("❌ Введите числовой ID:")
+        return
+    await state.update_data(mute_uid=int(message.text))
+    await state.set_state(AdminStates.mute_duration)
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text="15 мин",  callback_data="mute_15"),
+        InlineKeyboardButton(text="1 час",   callback_data="mute_60"),
+        InlineKeyboardButton(text="1 день",  callback_data="mute_1440")
+    )
+    kb.row(InlineKeyboardButton(text="Своё время (минуты)", callback_data="mute_custom"))
+    await message.answer("⏱ Выберите длительность мута:", reply_markup=kb.as_markup())
+
+
+@dp.callback_query(F.data.startswith("mute_"))
+async def mute_duration_cb(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    uid = data.get("mute_uid")
+    if not uid:
+        return await call.answer("Ошибка")
+
+    dur_map = {"mute_15": 15, "mute_60": 60, "mute_1440": 1440}
+    if call.data in dur_map:
+        minutes = dur_map[call.data]
+        mute_user(uid, minutes)
+        await state.clear()
+        try:
+            await bot.send_message(uid, f"🔇 Вы были замучены на {minutes} минут.")
+        except Exception:
+            pass
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text="👑 Админ панель", callback_data="admin_panel"))
+        await call.message.edit_text(
+            f"✅ Пользователь <code>{uid}</code> замучен на {minutes} минут.",
+            reply_markup=kb.as_markup(), parse_mode="HTML"
+        )
+    elif call.data == "mute_custom":
+        await call.message.edit_text("⏱ Введите количество минут:")
+        await call.answer()
+
+
+@dp.message(AdminStates.mute_duration)
+async def mute_duration_text(message: Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("❌ Введите число (минуты):")
+        return
+    data = await state.get_data()
+    uid = data["mute_uid"]
+    minutes = int(message.text)
+    mute_user(uid, minutes)
+    await state.clear()
+    try:
+        await bot.send_message(uid, f"🔇 Вы были замучены на {minutes} минут.")
+    except Exception:
+        pass
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="👑 Админ панель", callback_data="admin_panel"))
+    await message.answer(
+        f"✅ Пользователь <code>{uid}</code> замучен на {minutes} минут.",
+        reply_markup=kb.as_markup(), parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data == "admin_unmute")
+async def admin_unmute_start(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        return await call.answer("🚫", show_alert=True)
+    await state.set_state(AdminStates.unmute_user_id)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel"))
+    await call.message.edit_text(
+        "🔊 <b>Размут пользователя</b>\n\nВведите <b>ID</b> пользователя:",
+        reply_markup=kb.as_markup(), parse_mode="HTML"
+    )
+
+
+@dp.message(AdminStates.unmute_user_id)
+async def do_unmute(message: Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("❌ Введите числовой ID:")
+        return
+    uid = int(message.text)
+    unmute_user(uid)
+    await state.clear()
+    try:
+        await bot.send_message(uid, "🔊 Ваш мут был снят!")
+    except Exception:
+        pass
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="👑 Админ панель", callback_data="admin_panel"))
+    await message.answer(
+        f"✅ Мут пользователя <code>{uid}</code> снят.",
+        reply_markup=kb.as_markup(), parse_mode="HTML"
+    )
+
+
+# ── Проверка пользователя ──────────────────
+
+@dp.callback_query(F.data == "admin_check_user")
+async def admin_check_user_start(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        return await call.answer("🚫", show_alert=True)
+    await state.set_state(AdminStates.check_user_id)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel"))
+    await call.message.edit_text(
+        "🔍 <b>Проверка пользователя</b>\n\nВведите <b>ID</b>:",
+        reply_markup=kb.as_markup(), parse_mode="HTML"
+    )
+
+
+@dp.message(AdminStates.check_user_id)
+async def do_check_user(message: Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("❌ Введите числовой ID:")
+        return
+    uid = int(message.text)
+    u = get_user(uid)
+    await state.clear()
+    if not u:
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel"))
+        await message.answer(f"❌ Пользователь <code>{uid}</code> не найден.", reply_markup=kb.as_markup(), parse_mode="HTML")
+        return
+
+    muted = is_muted(uid)
+    text = (
+        f"🔍 <b>Информация о пользователе</b>\n\n"
+        f"🆔 ID: <code>{u['user_id']}</code>\n"
+        f"📛 Имя: {u['full_name']}\n"
+        f"🔖 Username: @{u['username'] or '—'}\n"
+        f"📅 Регистрация: {u['joined_at'][:10]}\n"
+        f"🚫 Бан: {'Да' if u['is_banned'] else 'Нет'}\n"
+        f"🔇 Мут: {'Да' if muted else 'Нет'}\n"
+    )
+    kb = InlineKeyboardBuilder()
+    if u["is_banned"]:
+        kb.row(InlineKeyboardButton(text="✅ Разбанить", callback_data=f"quick_unban_{uid}"))
+    else:
+        kb.row(InlineKeyboardButton(text="🚫 Забанить", callback_data=f"quick_ban_{uid}"))
+    if muted:
+        kb.row(InlineKeyboardButton(text="🔊 Размутить", callback_data=f"quick_unmute_{uid}"))
+    else:
+        kb.row(InlineKeyboardButton(text="🔇 Замутить на 1ч", callback_data=f"quick_mute_{uid}"))
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel"))
+    await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("quick_ban_"))
+async def quick_ban(call: CallbackQuery):
+    uid = int(call.data.split("_")[2])
+    ban_user(uid)
+    await call.answer(f"✅ Пользователь {uid} забанен!")
+    try:
+        await bot.send_message(uid, "🚫 Вы были заблокированы администратором.")
+    except Exception:
+        pass
+
+
+@dp.callback_query(F.data.startswith("quick_unban_"))
+async def quick_unban(call: CallbackQuery):
+    uid = int(call.data.split("_")[2])
+    unban_user(uid)
+    await call.answer(f"✅ Пользователь {uid} разбанен!")
+    try:
+        await bot.send_message(uid, "✅ Ваша блокировка снята!")
+    except Exception:
+        pass
+
+
+@dp.callback_query(F.data.startswith("quick_mute_"))
+async def quick_mute(call: CallbackQuery):
+    uid = int(call.data.split("_")[2])
+    mute_user(uid, 60)
+    await call.answer(f"✅ Пользователь {uid} замучен на 1 час!")
+    try:
+        await bot.send_message(uid, "🔇 Вы замучены на 1 час.")
+    except Exception:
+        pass
+
+
+@dp.callback_query(F.data.startswith("quick_unmute_"))
+async def quick_unmute(call: CallbackQuery):
+    uid = int(call.data.split("_")[2])
+    unmute_user(uid)
+    await call.answer(f"✅ Мут пользователя {uid} снят!")
+    try:
+        await bot.send_message(uid, "🔊 Ваш мут снят!")
+    except Exception:
+        pass
+
+
+# ══════════════════════════════════════════════
+# 📢 РАССЫЛКА
+# ══════════════════════════════════════════════
+# Формат кнопок в рассылке:
+# Текст кнопки | https://ссылка
+# Несколько кнопок — каждая на новой строке
+
+@dp.callback_query(F.data == "admin_broadcast")
+async def broadcast_start(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        return await call.answer("🚫", show_alert=True)
+    await state.set_state(AdminStates.broadcast_text)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel"))
+    await call.message.edit_text(
+        "📢 <b>Умная рассылка</b>\n\n"
+        "Введите текст сообщения для рассылки.\n"
+        "<i>Поддерживается HTML разметка: <b>жирный</b>, <i>курсив</i>, <code>код</code>, ссылки</i>",
+        reply_markup=kb.as_markup(), parse_mode="HTML"
+    )
+
+
+@dp.message(AdminStates.broadcast_text)
+async def broadcast_get_text(message: Message, state: FSMContext):
+    await state.update_data(broadcast_text=message.text, broadcast_html=message.html_text)
+    await state.set_state(AdminStates.broadcast_buttons)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="⏭ Пропустить кнопки", callback_data="skip_buttons"))
+    await message.answer(
+        "🔘 <b>Добавить кнопки?</b>\n\n"
+        "Введите кнопки в формате:\n"
+        "<code>Текст кнопки | https://ссылка</code>\n\n"
+        "Каждая кнопка — на отдельной строке.\n"
+        "Пример:\n"
+        "<code>🌟 Наш сайт | https://example.com\n"
+        "💎 VIP канал | https://t.me/vip</code>",
+        reply_markup=kb.as_markup(), parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data == "skip_buttons")
+async def skip_buttons(call: CallbackQuery, state: FSMContext):
+    await state.update_data(buttons=[])
+    await state.set_state(AdminStates.broadcast_confirm)
+    data = await state.get_data()
+    await show_broadcast_preview(call.message, data, state)
+
+
+@dp.message(AdminStates.broadcast_buttons)
+async def broadcast_get_buttons(message: Message, state: FSMContext):
+    buttons = []
+    lines = message.text.strip().split("\n")
+    errors = []
+    for i, line in enumerate(lines):
+        if "|" not in line:
+            errors.append(f"Строка {i+1}: нет символа '|'")
+            continue
+        parts = line.split("|", 1)
+        btn_text = parts[0].strip()
+        btn_url  = parts[1].strip()
+        if not btn_url.startswith("http"):
+            errors.append(f"Строка {i+1}: некорректная ссылка")
+            continue
+        buttons.append({"text": btn_text, "url": btn_url})
+
+    if errors:
+        await message.answer(
+            "⚠️ <b>Ошибки в кнопках:</b>\n" + "\n".join(errors) + "\n\nПопробуйте ещё раз:",
+            parse_mode="HTML"
+        )
+        return
+
+    await state.update_data(buttons=buttons)
+    await state.set_state(AdminStates.broadcast_confirm)
+    data = await state.get_data()
+    await show_broadcast_preview(message, data, state)
+
+
+async def show_broadcast_preview(message: Message, data: dict, state: FSMContext):
+    buttons = data.get("buttons", [])
+    text = data.get("broadcast_html") or data.get("broadcast_text", "")
+    stats = get_stats()
+
+    preview_kb = InlineKeyboardBuilder()
+    for btn in buttons:
+        preview_kb.row(InlineKeyboardButton(text=btn["text"], url=btn["url"]))
+
+    if buttons:
+        await message.answer(
+            "👁 <b>Предпросмотр сообщения:</b>",
+            parse_mode="HTML"
+        )
+        await message.answer(text, reply_markup=preview_kb.as_markup(), parse_mode="HTML")
+    else:
+        await message.answer("👁 <b>Предпросмотр:</b>", parse_mode="HTML")
+        await message.answer(text, parse_mode="HTML")
+
+    confirm_kb = InlineKeyboardBuilder()
+    confirm_kb.row(
+        InlineKeyboardButton(
+            text=f"✅ Отправить ({stats['total'] - stats['banned']} юзеров)",
+            callback_data="confirm_broadcast"
+        )
+    )
+    confirm_kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel"))
+    await message.answer(
+        f"📊 Получателей: <b>{stats['total'] - stats['banned']}</b>\n"
+        f"🔘 Кнопок: <b>{len(buttons)}</b>",
+        reply_markup=confirm_kb.as_markup(), parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data == "confirm_broadcast")
+async def confirm_broadcast(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        return await call.answer("🚫", show_alert=True)
+
+    data = await state.get_data()
+    await state.clear()
+
+    text    = data.get("broadcast_html") or data.get("broadcast_text", "")
+    buttons = data.get("buttons", [])
+
+    kb = None
+    if buttons:
+        bkb = InlineKeyboardBuilder()
+        for btn in buttons:
+            bkb.row(InlineKeyboardButton(text=btn["text"], url=btn["url"]))
+        kb = bkb.as_markup()
+
+    users = get_all_users()
+    sent = 0
+    failed = 0
+
+    status_msg = await call.message.answer("📤 Отправляю рассылку...")
+
+    for (uid,) in users:
+        try:
+            await bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
+            sent += 1
+            if sent % 20 == 0:
+                await status_msg.edit_text(f"📤 Отправлено: {sent}/{len(users)}...")
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05)  # Антифлуд
+
+    save_broadcast(text, buttons, sent)
+
+    result_kb = InlineKeyboardBuilder()
+    result_kb.row(InlineKeyboardButton(text="👑 Панель", callback_data="admin_panel"))
+    await status_msg.edit_text(
+        f"✅ <b>Рассылка завершена!</b>\n\n"
+        f"📤 Отправлено: <b>{sent}</b>\n"
+        f"❌ Ошибок: <b>{failed}</b>",
+        reply_markup=result_kb.as_markup(), parse_mode="HTML"
+    )
+    await call.answer()
+
+
+# ══════════════════════════════════════════════
+# 🛡️ ФИЛЬТР МУТА ДЛЯ СООБЩЕНИЙ
+# ══════════════════════════════════════════════
 
 @dp.message()
-async def handle_unknown(message: Message):
-    """Обработчик всех остальных сообщений"""
-    await message.reply(
-        "Я понимаю только видео и голосовые сообщения. "
-        "Отправь видео для создания кружка или голосовое для распознавания текста.\n"
-        "Используй /help для справки."
-    )
+async def message_filter(message: Message):
+    if is_muted(message.from_user.id):
+        await message.reply("🔇 Вы замучены и не можете отправлять сообщения.")
+        return
+
+
+# ══════════════════════════════════════════════
+# 🚀 ЗАПУСК
+# ══════════════════════════════════════════════
 
 async def main():
-    """Главная функция запуска бота"""
-    logger.info("Starting bot...")
-    await dp.start_polling(bot)
+    print("🤖 Бот запущен!")
+    await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
