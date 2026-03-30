@@ -1,11 +1,10 @@
-
-
 import asyncio
 import logging
 import sqlite3
 import json
 from datetime import datetime, timedelta
 from typing import Optional
+import base64
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
@@ -79,6 +78,17 @@ def init_db():
             buttons     TEXT,
             sent_at     TEXT,
             sent_count  INTEGER DEFAULT 0
+        )
+    """)
+
+    # НОВАЯ ТАБЛИЦА — КАТАЛОГ (40 товаров)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            id            INTEGER PRIMARY KEY,
+            name          TEXT,
+            description   TEXT,
+            price_stars   INTEGER DEFAULT 0,
+            active        INTEGER DEFAULT 1
         )
     """)
 
@@ -163,6 +173,31 @@ def save_broadcast(text, buttons, sent_count):
         conn.execute("INSERT INTO broadcasts (text,buttons,sent_at,sent_count) VALUES (?,?,?,?)",
                      (text, json.dumps(buttons), datetime.now().isoformat(), sent_count))
 
+# Новые функции для каталога
+def get_product(product_id: int):
+    with db() as conn:
+        row = conn.execute(
+            "SELECT id, name, description, price_stars FROM products WHERE id=?",
+            (product_id,)
+        ).fetchone()
+        if row:
+            return {
+                "id": row[0],
+                "name": row[1] or f"Товар №{row[0]}",
+                "description": row[2] or "",
+                "price_stars": row[3] or 0
+            }
+    return None
+
+def get_catalog_page(page: int = 1, per_page: int = 10):
+    offset = (page - 1) * per_page
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id, name FROM products ORDER BY id LIMIT ? OFFSET ?",
+            (per_page, offset)
+        ).fetchall()
+    return rows
+
 # ══════════════════════════════════════════════
 # 🎛️ FSM СОСТОЯНИЯ
 # ══════════════════════════════════════════════
@@ -188,6 +223,14 @@ class AdminStates(StatesGroup):
     # Проверка юзера
     check_user_id = State()
 
+# Новые состояния для пользователей
+class UserStates(StatesGroup):
+    wait_screenshot = State()   # ожидание скрина оплаты звёздами
+
+class CryptoStates(StatesGroup):
+    encrypt = State()
+    decrypt = State()
+
 # ══════════════════════════════════════════════
 # 🔑 ИНИЦИАЛИЗАЦИЯ
 # ══════════════════════════════════════════════
@@ -198,6 +241,16 @@ init_db()
 # Загружаем каналы из конфига в БД при первом запуске
 for ch in REQUIRED_CHANNELS:
     add_channel(ch["title"], ch["url"], ch["id"])
+
+# Инициализация 40 пустых товаров (при первом запуске)
+with db() as conn:
+    for i in range(1, 41):
+        conn.execute(
+            "INSERT OR IGNORE INTO products (id, name, description, price_stars, active) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (i, f"Пустой товар {i}", "", 0, 0)
+        )
+    conn.commit()
 
 bot = Bot(token=BOT_TOKEN)
 dp  = Dispatcher(storage=MemoryStorage())
@@ -237,6 +290,8 @@ def main_menu(user_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     if is_admin(user_id):
         kb.row(InlineKeyboardButton(text="⚙️ Админ панель", callback_data="admin_panel"))
+    kb.row(InlineKeyboardButton(text="📦 Каталог", callback_data="catalog"))
+    kb.row(InlineKeyboardButton(text="🔐 Шифрование текста", callback_data="encryption"))
     kb.row(InlineKeyboardButton(text="👤 Мой профиль", callback_data="my_profile"))
     kb.row(InlineKeyboardButton(text="ℹ️ О боте", callback_data="about"))
     return kb.as_markup()
@@ -247,9 +302,6 @@ WELCOME_TEXT = """
 Рады видеть тебя здесь 🎉
 
 Используй меню ниже для навигации.
-
-<i>Еcли стαтγc kлиентα был от монет c ρ℮φeραлοв, тο пρи вывoд℮ oн мoжет πρoπаcть (koнвертация в 💠 сохρанит)
-қγρс  1 мoн℮тα = 2 кристαллα 💠</i>
 """
 
 # ══════════════════════════════════════════════
@@ -281,6 +333,19 @@ async def cmd_start(message: Message):
         )
         return
 
+    # Уведомление реферера (только если человек успешно прошёл подписку)
+    if ref_by and ref_by != user.id:
+        try:
+            await bot.send_message(
+                ref_by,
+                f"🎉 <b>Новый реферал!</b>\n\n"
+                f"Пользователь <b>{user.full_name}</b> (@{user.username or '—'}) "
+                f"присоединился по вашей реферальной ссылке!",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass  # если реферер заблокировал бота — тихо
+
     await message.answer(WELCOME_TEXT, reply_markup=main_menu(user.id), parse_mode="HTML")
 
 
@@ -309,10 +374,8 @@ async def my_profile(call: CallbackQuery):
     text = (
         f"👤 <b>Ваш профиль</b>\n\n"
         f"🆔 ID: <code>{u['user_id']}</code>\n"
-        f"📛 Имя: {u['full_name']}\n"
         f"🔖 Username: @{u['username'] or '—'}\n"
         f"📅 Регистрация: {u['joined_at'][:10]}\n"
-        f"🔇 Статус: {'🔇 Замучен' if muted else '✅ Активен'}\n"
     )
     if u.get("ref_by"):
         text += f"👥 Приглашён: <code>{u['ref_by']}</code>\n"
@@ -333,9 +396,7 @@ async def ref_link(call: CallbackQuery):
 async def about(call: CallbackQuery):
     text = (
         "ℹ️ <b>О боте</b>\n\n"
-        "Этот бот создан для управления сообществом.\n\n"
-        "<i>Еcли стαтγc kлиентα был от монет c ρ℮φeραлοв, тο пρи вывoд℮ oн мoжет πρoπаcть (koнвертация в 💠 сохρανит)\n"
-        "қγρс  1 мoн℮тα = 2 кристαллα 💠</i>"
+        "Этот бот создан для управления сообществом."
     )
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu"))
@@ -347,8 +408,215 @@ async def go_main_menu(call: CallbackQuery):
     await call.message.edit_text(WELCOME_TEXT, reply_markup=main_menu(call.from_user.id), parse_mode="HTML")
 
 # ══════════════════════════════════════════════
+# 📦 КАТАЛОГ (40 товаров)
+# ══════════════════════════════════════════════
+
+def catalog_keyboard(page: int = 1) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    rows = get_catalog_page(page)
+    for pid, name in rows:
+        display = name if name and not name.startswith("Пустой товар") else f"Товар №{pid}"
+        kb.row(InlineKeyboardButton(text=display, callback_data=f"product_{pid}"))
+
+    # Пагинация (всего 4 страницы по 10 товаров)
+    if page > 1:
+        kb.row(InlineKeyboardButton(text="⬅️ Предыдущая", callback_data=f"catalog_page_{page-1}"))
+    if page < 4:
+        kb.row(InlineKeyboardButton(text="Следующая ➡️", callback_data=f"catalog_page_{page+1}"))
+    kb.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu"))
+    return kb.as_markup()
+
+
+@dp.callback_query(F.data == "catalog")
+async def show_catalog(call: CallbackQuery):
+    await call.message.edit_text(
+        "📦 <b>Каталог товаров</b>\n\nСтраница 1/4\nВыберите товар:",
+        reply_markup=catalog_keyboard(1),
+        parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data.startswith("catalog_page_"))
+async def show_catalog_page(call: CallbackQuery):
+    page = int(call.data.split("_")[-1])
+    await call.message.edit_text(
+        f"📦 <b>Каталог товаров</b>\n\nСтраница {page}/4\nВыберите товар:",
+        reply_markup=catalog_keyboard(page),
+        parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data.startswith("product_"))
+async def product_detail(call: CallbackQuery):
+    pid = int(call.data.split("_")[1])
+    prod = get_product(pid)
+    if not prod:
+        await call.answer("Товар не найден", show_alert=True)
+        return
+
+    text = (
+        f"📦 <b>{prod['name']}</b>\n\n"
+        f"{prod['description'] or 'Описание будет добавлено позже'}\n\n"
+        f"💰 Цена: <b>{prod['price_stars']} ⭐</b>\n\n"
+        f"Выберите способ оплаты:"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="⭐ Оплата звёздами", callback_data=f"pay_stars_{pid}"))
+    kb.row(InlineKeyboardButton(text="💎 Cryptobot", callback_data=f"pay_crypto_{pid}"))
+    kb.row(InlineKeyboardButton(text="🔙 Назад в каталог", callback_data="catalog"))
+    await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+# Оплата звездами — запрос скрина
+@dp.callback_query(F.data.startswith("pay_stars_"))
+async def start_pay_stars(call: CallbackQuery, state: FSMContext):
+    pid = int(call.data.split("_")[2])
+    prod = get_product(pid)
+    if not prod or prod["price_stars"] <= 0:
+        await call.answer("❌ Цена не установлена для этого товара!", show_alert=True)
+        return
+
+    text = (
+        f"⭐ <b>Оплата звездами</b>\n\n"
+        f"Товар: <b>{prod['name']}</b>\n"
+        f"Сумма: <b>{prod['price_stars']} ⭐</b>\n\n"
+        f"1. Отправьте {prod['price_stars']} Telegram Stars администратору.\n"
+        f"2. После оплаты пришлите скриншот оплаты сюда.\n\n"
+        f"<i>Укажите в комментарии к оплате ваш ID: {call.from_user.id}</i>"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"product_{pid}"))
+    await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    await state.set_state(UserStates.wait_screenshot)
+    await state.update_data(pid=pid)
+
+
+@dp.message(UserStates.wait_screenshot, F.photo)
+async def handle_screenshot(message: Message, state: FSMContext):
+    data = await state.get_data()
+    pid = data.get("pid")
+    if not pid:
+        await state.clear()
+        return
+
+    prod = get_product(pid)
+    user = message.from_user
+
+    caption = (
+        f"🛍️ <b>Новая оплата звездами на проверку!</b>\n\n"
+        f"Товар: <b>{prod['name']}</b> (ID: {pid})\n"
+        f"Сумма: {prod['price_stars']} ⭐\n"
+        f"Пользователь: <a href='tg://user?id={user.id}'>{user.full_name}</a> "
+        f"(@{user.username or '—'})\n"
+        f"ID: <code>{user.id}</code>"
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.forward_message(
+                chat_id=admin_id,
+                from_chat_id=message.chat.id,
+                message_id=message.message_id
+            )
+            await bot.send_message(admin_id, caption, parse_mode="HTML")
+        except Exception:
+            pass
+
+    await message.answer(
+        "✅ Скриншот отправлен администраторам на проверку!\n"
+        "После подтверждения товар будет выдан."
+    )
+    await state.clear()
+
+
+@dp.message(UserStates.wait_screenshot)
+async def handle_not_photo(message: Message, state: FSMContext):
+    await message.answer("❌ Пожалуйста, отправьте <b>скриншот оплаты</b> (фото).", parse_mode="HTML")
+
+
+# Оплата Cryptobot (заглушка — можно расширить позже)
+@dp.callback_query(F.data.startswith("pay_crypto_"))
+async def pay_crypto(call: CallbackQuery):
+    pid = int(call.data.split("_")[2])
+    prod = get_product(pid)
+    text = (
+        f"💎 <b>Оплата через Cryptobot</b>\n\n"
+        f"Товар: <b>{prod['name']}</b>\n\n"
+        f"Перейдите в @cryptobot и оплатите товар.\n"
+        f"После оплаты (по желанию) можете прислать скриншот для подтверждения."
+    )
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🔙 Назад к товару", callback_data=f"product_{pid}"))
+    await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+# ══════════════════════════════════════════════
+# 🔐 ШИФРОВАНИЕ ТЕКСТА
+# ══════════════════════════════════════════════
+
+@dp.callback_query(F.data == "encryption")
+async def show_encryption_menu(call: CallbackQuery):
+    text = "🔐 <b>Шифрование текста в боте</b>\n\nВыберите действие:"
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🔒 Зашифровать", callback_data="start_encrypt"))
+    kb.row(InlineKeyboardButton(text="🔓 Расшифровать", callback_data="start_decrypt"))
+    kb.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu"))
+    await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "start_encrypt")
+async def start_encrypt(call: CallbackQuery, state: FSMContext):
+    await state.set_state(CryptoStates.encrypt)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="encryption"))
+    await call.message.edit_text(
+        "🔒 <b>Зашифровать текст</b>\n\nВведите текст, который нужно зашифровать:",
+        reply_markup=kb.as_markup(), parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data == "start_decrypt")
+async def start_decrypt(call: CallbackQuery, state: FSMContext):
+    await state.set_state(CryptoStates.decrypt)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="encryption"))
+    await call.message.edit_text(
+        "🔓 <b>Расшифровать текст</b>\n\nВведите зашифрованный текст (Base64):",
+        reply_markup=kb.as_markup(), parse_mode="HTML"
+    )
+
+
+@dp.message(CryptoStates.encrypt)
+async def process_encrypt(message: Message, state: FSMContext):
+    try:
+        encrypted = base64.urlsafe_b64encode(message.text.encode("utf-8")).decode("utf-8")
+        await message.answer(
+            f"🔒 <b>Зашифровано (Base64 URL-safe):</b>\n\n"
+            f"<code>{encrypted}</code>\n\n"
+            f"Скопируйте и используйте кнопку «Расшифровать» позже.",
+            parse_mode="HTML"
+        )
+    except Exception:
+        await message.answer("❌ Ошибка при шифровании.")
+    await state.clear()
+
+
+@dp.message(CryptoStates.decrypt)
+async def process_decrypt(message: Message, state: FSMContext):
+    try:
+        decrypted = base64.urlsafe_b64decode(message.text.encode("utf-8")).decode("utf-8")
+        await message.answer(
+            f"🔓 <b>Расшифровано:</b>\n\n"
+            f"<code>{decrypted}</code>",
+            parse_mode="HTML"
+        )
+    except Exception:
+        await message.answer("❌ Ошибка расшифровки. Убедитесь, что текст корректный Base64.")
+    await state.clear()
+
+# ══════════════════════════════════════════════
 # 👑 АДМИН ПАНЕЛЬ
 # ══════════════════════════════════════════════
+# (весь блок админ-панели остался без изменений)
 
 def admin_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
@@ -455,7 +723,7 @@ async def add_channel_start(call: CallbackQuery, state: FSMContext):
 async def add_channel_title(message: Message, state: FSMContext):
     await state.update_data(title=message.text)
     await state.set_state(AdminStates.add_chan_url)
-    await message.answer("🔗 Введите <b>ссылку</b> на канал (https://t.me/...):", parse_mode="HTML")
+    await message.answer("🔗 Введите <b>ссылку</b> на канал[](https://t.me/...):", parse_mode="HTML")
 
 
 @dp.message(AdminStates.add_chan_url)
@@ -767,9 +1035,6 @@ async def quick_unmute(call: CallbackQuery):
 # ══════════════════════════════════════════════
 # 📢 РАССЫЛКА
 # ══════════════════════════════════════════════
-# Формат кнопок в рассылке:
-# Текст кнопки | https://ссылка
-# Несколько кнопок — каждая на новой строке
 
 @dp.callback_query(F.data == "admin_broadcast")
 async def broadcast_start(call: CallbackQuery, state: FSMContext):
@@ -944,3 +1209,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+</DOCUMENT>
