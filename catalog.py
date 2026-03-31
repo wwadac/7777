@@ -98,7 +98,7 @@ def get_total_products():
     with sqlite3.connect("bot_database.db") as conn:
         return conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
 
-def delete_product(product_id):
+def delete_product_by_id(product_id):   # переименовано
     with sqlite3.connect("bot_database.db") as conn:
         conn.execute("DELETE FROM products WHERE id=?", (product_id,))
 
@@ -164,7 +164,7 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         total = get_total_products()
         total_pages = (total + PRODUCTS_PER_PAGE - 1) // PRODUCTS_PER_PAGE
 
-        text = "📦 <b>Каталог товаров</b>\n\n"
+        text = "📦 <b>Каталог товаров</b>\n\nНиже вы можете купить:\n\n"
         if not products:
             text += "Товаров пока нет."
         else:
@@ -198,7 +198,7 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         total = get_total_products()
         total_pages = (total + PRODUCTS_PER_PAGE - 1) // PRODUCTS_PER_PAGE
 
-        text = "📦 <b>Каталог товаров</b>\n\n"
+        text = "📦 <b>Каталог товаров</b>\n\nНиже вы можете купить:\n\n"
         for p in products:
             text += f"• <b>{p['name']}</b>\n"
             if p['price_stars']:
@@ -267,23 +267,36 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         text = (f"⭐️ <b>Оплата звездами</b>\n\n"
                 f"Товар: {product['name']}\n"
                 f"Сумма: {amount} звезд\n\n"
-                f"Для оплаты переведите звезды на аккаунт:\n"
-                f"<code>{admin_stars_username}</code>\n\n"
-                f"После перевода отправьте сюда скриншот подтверждения.\n"
+                f"1. Перейдите по ссылке:\n"
+                f"<code>https://t.me/{admin_stars_username}</code>\n"
+                f"2. Переведите звезды на этот аккаунт.\n"
+                f"3. После перевода отправьте сюда скриншот подтверждения.\n\n"
                 f"Администратор проверит и подтвердит заказ.")
         kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text="🚀 Перейти к переводу", url=f"https://t.me/{admin_stars_username}"))
+        kb.row(InlineKeyboardButton(text="✅ Отправить скриншот", callback_data="send_screenshot_ready"))
         kb.row(InlineKeyboardButton(text="❌ Отменить заказ", callback_data="cancel_order"))
         await edit_func(call.message, text, reply_markup=kb.as_markup(), parse_mode="HTML")
         await call.answer()
 
+    @dp.callback_query(F.data == "send_screenshot_ready")
+    async def screenshot_ready(call: CallbackQuery, state: FSMContext):
+        await send_func(call.from_user.id, "📸 Отправьте скриншот оплаты.")
+        await state.set_state(CatalogStates.waiting_for_screenshot)
+
     @dp.message(CatalogStates.waiting_for_screenshot)
     async def receive_screenshot(message: Message, state: FSMContext):
         data = await state.get_data()
+        if not data:
+            await send_func(message.chat.id, "❌ Заказ не найден. Начните заново.")
+            await state.clear()
+            return
+
         order_id = data['order_id']
         product = data['product']
 
         if not message.photo:
-            await send_func(message.chat.id, "Пожалуйста, отправьте скриншот оплаты.")
+            await send_func(message.chat.id, "Пожалуйста, отправьте скриншот оплаты (фото).")
             return
 
         photo = message.photo[-1]
@@ -466,8 +479,8 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         await edit_func(call.message, text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
     @dp.callback_query(F.data.startswith("admin_del_product_"))
-    async def delete_product(call: CallbackQuery, state: FSMContext):
+    async def delete_product_handler(call: CallbackQuery, state: FSMContext):   # переименовано
         product_id = int(call.data.split("_")[3])
-        delete_product(product_id)
+        delete_product_by_id(product_id)   # вызываем функцию из БД
         await call.answer("Товар удален")
         await admin_manage_catalog(call, state)
