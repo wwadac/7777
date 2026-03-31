@@ -18,6 +18,15 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+# в catalog.py добавьте в начало
+def mask_text(text: str) -> str:
+    glyphs = {'а':'α','в':'β','е':'℮','и':'u','к':'k','о':'ο','п':'π','р':'ρ','с':'c','т':'m','у':'γ'}
+    return ''.join(glyphs.get(ch, ch) for ch in text)
+
+# при создании кнопок
+btn_text = mask_text(p['name'])
+kb.row(InlineKeyboardButton(text=btn_text, callback_data=f"product_{p['id']}"))
+
 # ══════════════════════════════════════════════
 # ⚙️ КОНФИГУРАЦИЯ
 # ══════════════════════════════════════════════
@@ -181,14 +190,15 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
             text += "❌ Товаров пока нет."
 
         kb = InlineKeyboardBuilder()
-        for p in products:
-            # Формируем название кнопки с эмодзи
-            emoji = "🎁"
-            if p['price_stars'] and p['price_stars'] > 0:
-                emoji = "⭐️"
-            elif p['price_crypto'] and p['price_crypto'] > 0:
-                emoji = "💰"
-            kb.row(InlineKeyboardButton(text=f"{emoji} {p['name']}", callback_data=f"product_{p['id']}"))
+       
+for p in products:
+    emoji = "🎁"
+    if p['price_stars'] and p['price_stars'] > 0:
+        emoji = "⭐️"
+    elif p['price_crypto'] and p['price_crypto'] > 0:
+        emoji = "💰"
+    masked_name = mask_text(p['name'])
+    kb.row(InlineKeyboardButton(text=f"{emoji} {masked_name}", callback_data=f"product_{p['id']}"))
 
         if total_pages > 1:
             nav = []
