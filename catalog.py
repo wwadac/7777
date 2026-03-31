@@ -3,6 +3,8 @@ import logging
 import sqlite3
 import json
 import requests
+import random
+import io
 from datetime import datetime
 from typing import List, Dict, Optional
 
@@ -10,17 +12,21 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
+from aiogram.types import (
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    CallbackQuery, Message, FSInputFile
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # ══════════════════════════════════════════════
-# ⚙️ КОНФИГУРАЦИЯ КРИПТОБОТА
+# ⚙️ КОНФИГУРАЦИЯ
 # ══════════════════════════════════════════════
 
 CRYPTOBOT_TOKEN = "554603:AAoJCtxFiCgxpUiQAWVNUi6bF4q7zbcThyy"   # Замените на свой токен
 CRYPTOBOT_API_URL = "https://pay.crypt.bot/api"
 
-PRODUCTS_PER_PAGE = 10
+PRODUCTS_PER_PAGE = 15  # Максимум кнопок на страницу
+SHUFFLE_PRODUCTS = True  # Перемешивать товары в каталоге
 
 # ══════════════════════════════════════════════
 # 🎛️ FSM СОСТОЯНИЯ КАТАЛОГА
@@ -33,6 +39,7 @@ class CatalogStates(StatesGroup):
     waiting_for_product_description = State()
     waiting_for_screenshot = State()
     waiting_for_crypto_payment = State()
+    waiting_for_txt_upload = State()  # новое состояние для загрузки TXT
 
 # ══════════════════════════════════════════════
 # 📊 БАЗА ДАННЫХ
@@ -76,13 +83,16 @@ def add_product(name, price_stars=None, price_crypto=None, description=""):
         )
         return cur.lastrowid
 
-def get_products(offset=0, limit=PRODUCTS_PER_PAGE):
+def get_products(offset=0, limit=PRODUCTS_PER_PAGE, shuffle=False):
     with sqlite3.connect("bot_database.db") as conn:
         rows = conn.execute(
-            "SELECT id, name, price_stars, price_crypto, description FROM products ORDER BY id LIMIT ? OFFSET ?",
-            (limit, offset)
+            "SELECT id, name, price_stars, price_crypto, description FROM products ORDER BY id",
         ).fetchall()
-        return [{"id": r[0], "name": r[1], "price_stars": r[2], "price_crypto": r[3], "description": r[4]} for r in rows]
+        products = [{"id": r[0], "name": r[1], "price_stars": r[2], "price_crypto": r[3], "description": r[4]} for r in rows]
+        if shuffle:
+            random.shuffle(products)
+        # возвращаем срез для пагинации
+        return products[offset:offset+limit], len(products)
 
 def get_product(product_id):
     with sqlite3.connect("bot_database.db") as conn:
@@ -98,7 +108,7 @@ def get_total_products():
     with sqlite3.connect("bot_database.db") as conn:
         return conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
 
-def delete_product_by_id(product_id):   # переименовано
+def delete_product_by_id(product_id):
     with sqlite3.connect("bot_database.db") as conn:
         conn.execute("DELETE FROM products WHERE id=?", (product_id,))
 
@@ -125,6 +135,10 @@ def get_pending_order(user_id, product_id):
             (user_id, product_id)
         ).fetchone()
         return row[0] if row else None
+
+def clear_all_products():
+    with sqlite3.connect("bot_database.db") as conn:
+        conn.execute("DELETE FROM products")
 
 # ══════════════════════════════════════════════
 # 🤖 ФУНКЦИИ КРИПТОБОТА
@@ -160,11 +174,10 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
     async def show_catalog(call: CallbackQuery, state: FSMContext):
         await state.clear()
         page = 0
-        products = get_products(offset=page * PRODUCTS_PER_PAGE)
-        total = get_total_products()
+        products, total = get_products(offset=page * PRODUCTS_PER_PAGE, shuffle=SHUFFLE_PRODUCTS)
         total_pages = (total + PRODUCTS_PER_PAGE - 1) // PRODUCTS_PER_PAGE
 
-        text = "📦 <b>Каталог товаров</b>\n\nНиже вы можете купить:\n\n"
+        text = "📦 <b>Каталог товаров</b>\n\n"
         if not products:
             text += "Товаров пока нет."
         else:
@@ -194,11 +207,10 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
     @dp.callback_query(F.data.startswith("catalog_page_"))
     async def catalog_page(call: CallbackQuery, state: FSMContext):
         page = int(call.data.split("_")[2])
-        products = get_products(offset=page * PRODUCTS_PER_PAGE)
-        total = get_total_products()
+        products, total = get_products(offset=page * PRODUCTS_PER_PAGE, shuffle=SHUFFLE_PRODUCTS)
         total_pages = (total + PRODUCTS_PER_PAGE - 1) // PRODUCTS_PER_PAGE
 
-        text = "📦 <b>Каталог товаров</b>\n\nНиже вы можете купить:\n\n"
+        text = "📦 <b>Каталог товаров</b>\n\n"
         for p in products:
             text += f"• <b>{p['name']}</b>\n"
             if p['price_stars']:
@@ -318,7 +330,8 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
 
         for admin_id in admin_ids:
             try:
-                await bot.send_photo(admin_id, photo, caption=caption, reply_markup=kb.as_markup(), parse_mode="HTML")
+                # Отправляем фото с использованием file_id
+                await bot.send_photo(admin_id, photo=file_id, caption=caption, reply_markup=kb.as_markup(), parse_mode="HTML")
             except Exception as e:
                 logging.error(f"Не удалось отправить админу {admin_id}: {e}")
 
@@ -412,11 +425,74 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         kb = InlineKeyboardBuilder()
         kb.row(InlineKeyboardButton(text="➕ Добавить товар", callback_data="admin_add_product"))
         kb.row(InlineKeyboardButton(text="📋 Список товаров", callback_data="admin_list_products"))
+        kb.row(InlineKeyboardButton(text="📤 Загрузить из TXT", callback_data="admin_upload_txt"))
         kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel"))
         await edit_func(call.message, "Управление каталогом", reply_markup=kb.as_markup())
 
+    # --- Загрузка из TXT ---
+    @dp.callback_query(F.data == "admin_upload_txt")
+    async def upload_txt_start(call: CallbackQuery, state: FSMContext):
+        if call.from_user.id not in admin_ids:
+            return await call.answer("Нет доступа", show_alert=True)
+        await state.set_state(CatalogStates.waiting_for_txt_upload)
+        await edit_func(call.message, "Отправьте TXT-файл с товарами.\n\nФормат:\n```\nНазвание\nЦена_звездами\nЦена_USDT\nОписание\n---\nНазвание2\n...\n```\nРазделитель товаров: `---` (три дефиса).\nЦена 0 означает отсутствие.")
+        await call.answer()
+
+    @dp.message(CatalogStates.waiting_for_txt_upload)
+    async def process_txt_file(message: Message, state: FSMContext):
+        if message.from_user.id not in admin_ids:
+            return
+
+        if not message.document:
+            await send_func(message.chat.id, "❌ Отправьте файл в формате TXT.")
+            return
+
+        file = await bot.get_file(message.document.file_id)
+        file_content = await bot.download_file(file.file_path)
+        text = file_content.read().decode('utf-8')
+
+        # Парсим товары
+        items = text.strip().split('\n---\n')
+        success = 0
+        errors = []
+        for idx, item in enumerate(items, 1):
+            lines = item.strip().split('\n')
+            if len(lines) < 4:
+                errors.append(f"Товар {idx}: недостаточно полей (нужно 4 строки)")
+                continue
+            name = lines[0].strip()
+            price_stars = lines[1].strip()
+            price_crypto = lines[2].strip()
+            description = '\n'.join(lines[3:]).strip()
+
+            # Преобразование цен
+            try:
+                ps = int(price_stars) if price_stars.isdigit() else (None if price_stars == '0' else int(price_stars))
+            except:
+                ps = None
+            try:
+                pc = float(price_crypto) if price_crypto.replace('.','',1).isdigit() else (None if price_crypto == '0' else float(price_crypto))
+            except:
+                pc = None
+
+            if ps is None and pc is None:
+                errors.append(f"Товар {idx}: обе цены равны 0 или не указаны")
+                continue
+
+            add_product(name, ps, pc, description)
+            success += 1
+
+        result_text = f"✅ Загружено товаров: {success}\n❌ Ошибок: {len(errors)}"
+        if errors:
+            result_text += "\n\nОшибки:\n" + "\n".join(errors[:10])
+        await send_func(message.chat.id, result_text)
+        await state.clear()
+
+    # --- Остальные админ-функции (добавление, список, удаление) ---
     @dp.callback_query(F.data == "admin_add_product")
     async def add_product_start(call: CallbackQuery, state: FSMContext):
+        if call.from_user.id not in admin_ids:
+            return await call.answer("Нет доступа", show_alert=True)
         await state.set_state(CatalogStates.waiting_for_product_name)
         await edit_func(call.message, "Введите название товара:")
         await call.answer()
@@ -465,7 +541,9 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
 
     @dp.callback_query(F.data == "admin_list_products")
     async def list_products(call: CallbackQuery, state: FSMContext):
-        products = get_products(offset=0, limit=100)
+        if call.from_user.id not in admin_ids:
+            return await call.answer("Нет доступа", show_alert=True)
+        products, _ = get_products(offset=0, limit=1000, shuffle=False)
         if not products:
             await edit_func(call.message, "Нет товаров.")
             return
@@ -479,8 +557,10 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         await edit_func(call.message, text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
     @dp.callback_query(F.data.startswith("admin_del_product_"))
-    async def delete_product_handler(call: CallbackQuery, state: FSMContext):   # переименовано
+    async def delete_product_handler(call: CallbackQuery, state: FSMContext):
+        if call.from_user.id not in admin_ids:
+            return await call.answer("Нет доступа", show_alert=True)
         product_id = int(call.data.split("_")[3])
-        delete_product_by_id(product_id)   # вызываем функцию из БД
+        delete_product_by_id(product_id)
         await call.answer("Товар удален")
         await admin_manage_catalog(call, state)
