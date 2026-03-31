@@ -302,7 +302,7 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         await state.update_data(order_id=order_id, product=product)
         await state.set_state(CatalogStates.waiting_for_screenshot)
 
-        admin_stars_username = "@Id19911"  # ← ЗАМЕНИТЕ НА ВАШ USERNAME
+        admin_stars_username = "Id19911"  # ← ЗАМЕНИТЕ НА ВАШ USERNAME
         text = (f"⭐️ <b>Оплата звездами</b>\n\n"
                 f"📦 Товар: {product['name']}\n"
                 f"💰 Сумма: {stars_price} ⭐️\n\n"
