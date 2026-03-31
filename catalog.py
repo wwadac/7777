@@ -18,28 +18,30 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# в catalog.py добавьте в начало
-def mask_text(text: str) -> str:
-    glyphs = {'а':'α','в':'β','е':'℮','и':'u','к':'k','о':'ο','п':'π','р':'ρ','с':'c','т':'m','у':'γ'}
-    return ''.join(glyphs.get(ch, ch) for ch in text)
-
-# при создании кнопок
-btn_text = mask_text(p['name'])
-kb.row(InlineKeyboardButton(text=btn_text, callback_data=f"product_{p['id']}"))
-
 # ══════════════════════════════════════════════
 # ⚙️ КОНФИГУРАЦИЯ
 # ══════════════════════════════════════════════
 
-
-CRYPTOBOT_TOKEN = "554603:AAoJCtxFiCgxpUiQAWVNUi6bF4q7zbcThyy"   # Замените на свой токен
+CRYPTOBOT_TOKEN = "554603:AAoJCtxFiCgxpUiQAWVNUi6bF4q7zbcThyy"
 CRYPTOBOT_API_URL = "https://pay.crypt.bot/api"
 
 PRODUCTS_PER_PAGE = 15
 SHUFFLE_PRODUCTS = True
+USDT_TO_STARS_RATE = 2.5
 
-# Курс: 1 USDT = X звезд (настройте под свой курс)
-USDT_TO_STARS_RATE = 2.5  # 1 USDT = 2.5 звезд
+# ══════════════════════════════════════════════
+# 🧩 МАСКИРОВКА ТЕКСТА
+# ══════════════════════════════════════════════
+
+def mask_text(text: str) -> str:
+    glyphs = {
+        'а': 'α', 'в': 'β', 'е': '℮', 'и': 'u', 'к': 'k',
+        'о': 'ο', 'п': 'π', 'р': 'ρ', 'с': 'c', 'т': 'm',
+        'у': 'γ', 'А': 'Α', 'В': 'Β', 'Е': '℮', 'И': 'U',
+        'К': 'K', 'О': 'Ο', 'П': 'Π', 'Р': 'Ρ', 'С': 'C',
+        'Т': 'T', 'У': 'Υ'
+    }
+    return ''.join(glyphs.get(ch, ch) for ch in text)
 
 # ══════════════════════════════════════════════
 # 🎛️ FSM СОСТОЯНИЯ КАТАЛОГА
@@ -179,67 +181,65 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
 
     # --- Каталог для пользователей ---
     @dp.callback_query(F.data == "catalog")
-    @dp.callback_query(F.data == "catalog")
-async def show_catalog(call: CallbackQuery, state: FSMContext):
-    await state.clear()
-    page = 0
-    products, total = get_products(offset=page * PRODUCTS_PER_PAGE, shuffle=SHUFFLE_PRODUCTS)
-    total_pages = (total + PRODUCTS_PER_PAGE - 1) // PRODUCTS_PER_PAGE
+    async def show_catalog(call: CallbackQuery, state: FSMContext):
+        await state.clear()
+        page = 0
+        products, total = get_products(offset=page * PRODUCTS_PER_PAGE, shuffle=SHUFFLE_PRODUCTS)
+        total_pages = (total + PRODUCTS_PER_PAGE - 1) // PRODUCTS_PER_PAGE
 
-    text = "📦 <b>К A T A Л О Г</b>\n\n"
-    if not products:
-        text += "❌ Товаров пока нет."
+        text = "📦 <b>К A T A Л О Г</b>\n\n"
+        if not products:
+            text += "❌ Товаров пока нет."
 
-    kb = InlineKeyboardBuilder()
-    for p in products:
-        emoji = "🎁"
-        if p['price_stars'] and p['price_stars'] > 0:
-            emoji = "⭐️"
-        elif p['price_crypto'] and p['price_crypto'] > 0:
-            emoji = "💰"
-        masked_name = mask_text(p['name'])
-        kb.row(InlineKeyboardButton(text=f"{emoji} {masked_name}", callback_data=f"product_{p['id']}"))
+        kb = InlineKeyboardBuilder()
+        for p in products:
+            emoji = "🎁"
+            if p['price_stars'] and p['price_stars'] > 0:
+                emoji = "⭐️"
+            elif p['price_crypto'] and p['price_crypto'] > 0:
+                emoji = "💰"
+            masked_name = mask_text(p['name'])
+            kb.row(InlineKeyboardButton(text=f"{emoji} {masked_name}", callback_data=f"product_{p['id']}"))
 
-    if total_pages > 1:
+        if total_pages > 1:
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"catalog_page_{page-1}"))
+            if page < total_pages - 1:
+                nav.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"catalog_page_{page+1}"))
+            kb.row(*nav)
+
+        kb.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu"))
+        await edit_func(call.message, text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+    @dp.callback_query(F.data.startswith("catalog_page_"))
+    async def catalog_page(call: CallbackQuery, state: FSMContext):
+        page = int(call.data.split("_")[2])
+        products, total = get_products(offset=page * PRODUCTS_PER_PAGE, shuffle=SHUFFLE_PRODUCTS)
+        total_pages = (total + PRODUCTS_PER_PAGE - 1) // PRODUCTS_PER_PAGE
+
+        text = "📦 <b>К A T A Л О Г</b>\n\n"
+
+        kb = InlineKeyboardBuilder()
+        for p in products:
+            emoji = "🎁"
+            if p['price_stars'] and p['price_stars'] > 0:
+                emoji = "⭐️"
+            elif p['price_crypto'] and p['price_crypto'] > 0:
+                emoji = "💰"
+            masked_name = mask_text(p['name'])
+            kb.row(InlineKeyboardButton(text=f"{emoji} {masked_name}", callback_data=f"product_{p['id']}"))
+
         nav = []
         if page > 0:
             nav.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"catalog_page_{page-1}"))
         if page < total_pages - 1:
             nav.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"catalog_page_{page+1}"))
-        kb.row(*nav)
+        if nav:
+            kb.row(*nav)
 
-    kb.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu"))
-    await edit_func(call.message, text, reply_markup=kb.as_markup(), parse_mode="HTML")
-
-    @dp.callback_query(F.data.startswith("catalog_page_"))
-   @dp.callback_query(F.data.startswith("catalog_page_"))
-async def catalog_page(call: CallbackQuery, state: FSMContext):
-    page = int(call.data.split("_")[2])
-    products, total = get_products(offset=page * PRODUCTS_PER_PAGE, shuffle=SHUFFLE_PRODUCTS)
-    total_pages = (total + PRODUCTS_PER_PAGE - 1) // PRODUCTS_PER_PAGE
-
-    text = "📦 <b>К A T A Л О Г</b>\n\n"
-
-    kb = InlineKeyboardBuilder()
-    for p in products:
-        emoji = "🎁"
-        if p['price_stars'] and p['price_stars'] > 0:
-            emoji = "⭐️"
-        elif p['price_crypto'] and p['price_crypto'] > 0:
-            emoji = "💰"
-        masked_name = mask_text(p['name'])
-        kb.row(InlineKeyboardButton(text=f"{emoji} {masked_name}", callback_data=f"product_{p['id']}"))
-
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"catalog_page_{page-1}"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"catalog_page_{page+1}"))
-    if nav:
-        kb.row(*nav)
-
-    kb.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu"))
-    await edit_func(call.message, text, reply_markup=kb.as_markup(), parse_mode="HTML")
+        kb.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu"))
+        await edit_func(call.message, text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
     @dp.callback_query(F.data.startswith("product_"))
     async def product_detail(call: CallbackQuery, state: FSMContext):
@@ -500,7 +500,7 @@ async def catalog_page(call: CallbackQuery, state: FSMContext):
         await edit_func(call.message, "❌ Заказ отменен.", reply_markup=None)
         await call.answer("Заказ отменен")
 
-    # --- Администрирование каталога (остается без изменений) ---
+    # --- Администрирование каталога ---
     @dp.callback_query(F.data == "admin_manage_catalog")
     async def admin_manage_catalog(call: CallbackQuery, state: FSMContext):
         if call.from_user.id not in admin_ids:
