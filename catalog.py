@@ -19,9 +19,9 @@ from config import (
     ADMIN_STARS_USERNAME
 )
 
-══════════════════════════════════════════════
-🧩 МАСКИРОВКА ТЕКСТА
-══════════════════════════════════════════════
+#══════════════════════════════════════════════
+#🧩 МАСКИРОВКА ТЕКСТА
+#══════════════════════════════════════════════
 def mask_text(text: str) -> str:
     glyphs = {
         'а': 'α', 'в': 'β', 'е': '℮', 'и': 'u', 'к': 'k',
@@ -32,9 +32,9 @@ def mask_text(text: str) -> str:
     }
     return ''.join(glyphs.get(ch, ch) for ch in text)
 
-══════════════════════════════════════════════
-🎛️ FSM СОСТОЯНИЯ КАТАЛОГА
-══════════════════════════════════════════════
+#══════════════════════════════════════════════
+# FSM СОСТОЯНИЯ КАТАЛОГА
+#══════════════════════════════════════════════
 class CatalogStates(StatesGroup):
     waiting_for_product_name = State()
     waiting_for_product_price_crypto = State()
@@ -43,9 +43,9 @@ class CatalogStates(StatesGroup):
     waiting_for_crypto_payment = State()
     # waiting_for_txt_upload удалено
 
-══════════════════════════════════════════════
-📊 БАЗА ДАННЫХ
-══════════════════════════════════════════════
+#══════════════════════════════════════════════
+#📊 БАЗА ДАННЫХ
+#══════════════════════════════════════════════
 def init_catalog_db():
     conn = sqlite3.connect("bot_database.db")
     c = conn.cursor()
@@ -138,9 +138,9 @@ def clear_all_products():
     with sqlite3.connect("bot_database.db") as conn:
         conn.execute("DELETE FROM products")
 
-══════════════════════════════════════════════
-🤖 ФУНКЦИИ КРИПТОБОТА
-══════════════════════════════════════════════
+#══════════════════════════════════════════════
+#🤖 ФУНКЦИИ КРИПТОБОТА
+#══════════════════════════════════════════════
 def create_crypto_invoice(amount):
     headers = {'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN}
     data = {'asset': CRYPTOBOT_ASSET, 'amount': str(amount)}
@@ -160,9 +160,9 @@ def check_crypto_invoice(invoice_id):
             return invoices[0]
     return None
 
-══════════════════════════════════════════════
-🔧 РЕГИСТРАЦИЯ ХЭНДЛЕРОВ
-══════════════════════════════════════════════
+#══════════════════════════════════════════════
+#🔧 РЕГИСТРАЦИЯ ХЭНДЛЕРОВ
+#══════════════════════════════════════════════
 def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], send_func, edit_func):
     init_catalog_db()
     
