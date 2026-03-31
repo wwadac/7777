@@ -1,9 +1,12 @@
+<DOCUMENT filename="catalog(3).py">
 import asyncio
 import logging
 import sqlite3
 import random
+import io
 from datetime import datetime
 from typing import List, Dict, Optional
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -13,15 +16,17 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import requests
+
 from config import (
     CRYPTOBOT_TOKEN, CRYPTOBOT_API_URL, CRYPTOBOT_ASSET,
     PRODUCTS_PER_PAGE, SHUFFLE_PRODUCTS, USDT_TO_STARS_RATE,
     ADMIN_STARS_USERNAME
 )
 
-#══════════════════════════════════════════════
-#🧩 МАСКИРОВКА ТЕКСТА
-#══════════════════════════════════════════════
+# ══════════════════════════════════════════════
+# 🧩 МАСКИРОВКА ТЕКСТА
+# ══════════════════════════════════════════════
+
 def mask_text(text: str) -> str:
     glyphs = {
         'а': 'α', 'в': 'β', 'е': '℮', 'и': 'u', 'к': 'k',
@@ -32,53 +37,54 @@ def mask_text(text: str) -> str:
     }
     return ''.join(glyphs.get(ch, ch) for ch in text)
 
-#══════════════════════════════════════════════
-# FSM СОСТОЯНИЯ КАТАЛОГА
-#══════════════════════════════════════════════
+# ══════════════════════════════════════════════
+# 🎛️ FSM СОСТОЯНИЯ КАТАЛОГА
+# ══════════════════════════════════════════════
+
 class CatalogStates(StatesGroup):
     waiting_for_product_name = State()
+    waiting_for_product_price_stars = State()
     waiting_for_product_price_crypto = State()
     waiting_for_product_description = State()
     waiting_for_screenshot = State()
     waiting_for_crypto_payment = State()
-    # waiting_for_txt_upload удалено
+    waiting_for_txt_upload = State()
 
-#══════════════════════════════════════════════
-#📊 БАЗА ДАННЫХ
-#══════════════════════════════════════════════
+# ══════════════════════════════════════════════
+# 📊 БАЗА ДАННЫХ
+# ══════════════════════════════════════════════
+
 def init_catalog_db():
     conn = sqlite3.connect("bot_database.db")
     c = conn.cursor()
     c.execute("""
-    CREATE TABLE IF NOT EXISTS products (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    price_stars INTEGER,
-    price_crypto REAL,
-    description TEXT,
-    created_at TEXT
-    )
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            price_stars INTEGER,
+            price_crypto REAL,
+            description TEXT,
+            created_at TEXT
+        )
     """)
     c.execute("""
-    CREATE TABLE IF NOT EXISTS orders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    product_id INTEGER,
-    payment_method TEXT,
-    amount TEXT,
-    status TEXT,
-    created_at TEXT,
-    completed_at TEXT,
-    crypto_invoice_id TEXT,
-    screenshot_file_id TEXT
-    )
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            product_id INTEGER,
+            payment_method TEXT,
+            amount TEXT,
+            status TEXT,
+            created_at TEXT,
+            completed_at TEXT,
+            crypto_invoice_id TEXT,
+            screenshot_file_id TEXT
+        )
     """)
     conn.commit()
     conn.close()
 
-def add_product(name, price_crypto, description=""):
-    # Цена в звездах теперь рассчитывается автоматически
-    price_stars = int(price_crypto * USDT_TO_STARS_RATE)
+def add_product(name, price_stars=None, price_crypto=None, description=""):
     with sqlite3.connect("bot_database.db") as conn:
         cur = conn.execute(
             "INSERT INTO products (name, price_stars, price_crypto, description, created_at) VALUES (?,?,?,?,?)",
@@ -104,7 +110,7 @@ def get_product(product_id):
         ).fetchone()
         if row:
             return {"id": row[0], "name": row[1], "price_stars": row[2], "price_crypto": row[3], "description": row[4]}
-        return None
+    return None
 
 def delete_product_by_id(product_id):
     with sqlite3.connect("bot_database.db") as conn:
@@ -138,10 +144,12 @@ def clear_all_products():
     with sqlite3.connect("bot_database.db") as conn:
         conn.execute("DELETE FROM products")
 
-#══════════════════════════════════════════════
-#🤖 ФУНКЦИИ КРИПТОБОТА
-#══════════════════════════════════════════════
+# ══════════════════════════════════════════════
+# 🤖 ФУНКЦИИ КРИПТОБОТА
+# ══════════════════════════════════════════════
+
 def create_crypto_invoice(amount):
+    """Создаёт инвойс в CryptoBot. Использует 'asset' вместо 'currency'."""
     headers = {'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN}
     data = {'asset': CRYPTOBOT_ASSET, 'amount': str(amount)}
     response = requests.post(f"{CRYPTOBOT_API_URL}/createInvoice", headers=headers, json=data)
@@ -160,12 +168,13 @@ def check_crypto_invoice(invoice_id):
             return invoices[0]
     return None
 
-#══════════════════════════════════════════════
-#🔧 РЕГИСТРАЦИЯ ХЭНДЛЕРОВ
-#══════════════════════════════════════════════
+# ══════════════════════════════════════════════
+# 🔧 РЕГИСТРАЦИЯ ХЭНДЛЕРОВ
+# ══════════════════════════════════════════════
+
 def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], send_func, edit_func):
     init_catalog_db()
-    
+
     # --- Каталог для пользователей ---
     @dp.callback_query(F.data == "catalog")
     async def show_catalog(call: CallbackQuery, state: FSMContext):
@@ -174,7 +183,7 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         products, total = get_products(offset=page * PRODUCTS_PER_PAGE, shuffle=SHUFFLE_PRODUCTS)
         total_pages = (total + PRODUCTS_PER_PAGE - 1) // PRODUCTS_PER_PAGE
 
-        text = "📦  <b>К A T A Л О Г</b>\n\n"
+        text = "📦 <b>К A T A Л О Г</b>\n\n"
         if not products:
             text += "❌ Товаров пока нет."
 
@@ -205,7 +214,7 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         products, total = get_products(offset=page * PRODUCTS_PER_PAGE, shuffle=SHUFFLE_PRODUCTS)
         total_pages = (total + PRODUCTS_PER_PAGE - 1) // PRODUCTS_PER_PAGE
 
-        text = "📦  <b>К A T A Л О Г</b>\n\n"
+        text = "📦 <b>К A T A Л О Г</b>\n\n"
 
         kb = InlineKeyboardBuilder()
         for p in products:
@@ -236,35 +245,90 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
             await call.answer("❌ Товар не найден", show_alert=True)
             return
 
-        text = f"📦  <b>{product['name']}</b>\n\n"
-        text += f"📝  <i>{product['description']}</i>\n\n"
+        text = f"📦 <b>{product['name']}</b>\n\n"
+        text += f"📝 <i>{product['description']}</i>\n\n"
         text += f"═══════════════════\n"
-        text += f"💰  <b>Цена: </b>\n\n"
+        text += f"💰 <b>Способы оплаты:</b>\n\n"
 
-        # Всегда показываем обе цены, так как stars теперь вычисляются
-        crypto_price = product['price_crypto']
-        stars_price = product['price_stars']
-        
-        text += f"💎  <b>Криптовалюта:</b> {crypto_price} {CRYPTOBOT_ASSET}\n"
-        text += f"⭐️  <b>Звезды Telegram:</b> {stars_price} ⭐️\n"
+        # 🔥 ИСПРАВЛЕНИЕ: теперь сумма из TXT-файла (price_stars) отображается ВЕЗДЕ
+        # Если в TXT указана цена в звёздах — она и показывается (даже если есть price_crypto)
+        # Если price_stars нет — показывается эквивалент из price_crypto * USDT_TO_STARS_RATE
+        if product.get('price_stars') and product['price_stars'] > 0:
+            text += f"⭐️ <b>Звезды Telegram:</b> {product['price_stars']} ⭐️\n"
+        elif product.get('price_crypto') and product['price_crypto'] > 0:
+            stars_equivalent = int(product['price_crypto'] * USDT_TO_STARS_RATE)
+            text += f"⭐️ <b>Звезды Telegram:</b> {stars_equivalent} ⭐️\n"
+
+        if product.get('price_crypto') and product['price_crypto'] > 0:
+            text += f"💎 <b>Криптовалюта ({CRYPTOBOT_ASSET}):</b> {product['price_crypto']} {CRYPTOBOT_ASSET}\n"
 
         text += f"\n═══════════════════\n"
-        text += f"👇  <b>Выберите способ оплаты: </b>"
+        text += f"👇 <b>Выберите способ оплаты:</b>"
 
         kb = InlineKeyboardBuilder()
-        kb.row(InlineKeyboardButton(text=f"💎 Оплатить {crypto_price} {CRYPTOBOT_ASSET}", callback_data=f"pay_crypto_{product_id}"))
-        kb.row(InlineKeyboardButton(text=f"⭐️ Оплатить {stars_price} ⭐️", callback_data=f"pay_stars_{product_id}"))
+        if product['price_crypto'] and product['price_crypto'] > 0:
+            kb.row(InlineKeyboardButton(text=f"💎 Оплатить {CRYPTOBOT_ASSET} (Cryptobot)", callback_data=f"pay_crypto_{product_id}"))
+        if product['price_stars'] and product['price_stars'] > 0:
+            kb.row(InlineKeyboardButton(text="⭐️ Оплатить звездами", callback_data=f"pay_stars_{product_id}"))
+        elif product['price_crypto'] and product['price_crypto'] > 0:
+            stars_equivalent = int(product['price_crypto'] * USDT_TO_STARS_RATE)
+            kb.row(InlineKeyboardButton(text=f"⭐️ Оплатить звездами ({stars_equivalent}⭐️)", callback_data=f"pay_stars_equiv_{product_id}"))
 
         kb.row(InlineKeyboardButton(text="🔙 Назад в каталог", callback_data="catalog"))
         await edit_func(call.message, text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
-    # --- Оплата звездами ---
+    # --- Оплата звездами (эквивалент из USDT) ---
+    @dp.callback_query(F.data.startswith("pay_stars_equiv_"))
+    async def pay_stars_equiv(call: CallbackQuery, state: FSMContext):
+        product_id = int(call.data.split("_")[3])
+        product = get_product(product_id)
+        if not product:
+            await call.answer("❌ Товар не найден", show_alert=True)
+            return
+
+        stars_price = int(product['price_crypto'] * USDT_TO_STARS_RATE)
+
+        existing = get_pending_order(call.from_user.id, product_id)
+        if existing:
+            await call.answer("⚠️ У вас уже есть незавершенный заказ на этот товар.", show_alert=True)
+            return
+
+        amount = str(stars_price)
+        order_id = create_order(call.from_user.id, product_id, 'stars', amount)
+
+        await state.update_data(order_id=order_id, product=product)
+        await state.set_state(CatalogStates.waiting_for_screenshot)
+
+        text = (f"⭐️ <b>Оплата звездами</b>\n\n"
+                f"📦 Товар: {product['name']}\n"
+                f"💰 Сумма: {stars_price} ⭐️\n\n"
+                f"📌 <b>Инструкция:</b>\n"
+                f"1️⃣ Перейдите по ссылке: @{ADMIN_STARS_USERNAME}\n"
+                f"2️⃣ Переведите {stars_price} звезд на этот аккаунт\n"
+                f"3️⃣ После перевода нажмите «✅ Отправить скриншот»\n\n"
+                f"👨‍💻 Администратор проверит и подтвердит заказ")
+
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text="🚀 Перейти к переводу", url=f"https://t.me/{ADMIN_STARS_USERNAME}"))
+        kb.row(InlineKeyboardButton(text="✅ Отправить скриншот", callback_data="send_screenshot_ready"))
+        kb.row(InlineKeyboardButton(text="❌ Отменить заказ", callback_data="cancel_order"))
+        await edit_func(call.message, text, reply_markup=kb.as_markup(), parse_mode="HTML")
+        await call.answer()
+
+    # --- Оплата звездами (стандартная) ---
     @dp.callback_query(F.data.startswith("pay_stars_"))
     async def pay_stars(call: CallbackQuery, state: FSMContext):
+        if "equiv" in call.data:
+            return
+
         product_id = int(call.data.split("_")[2])
         product = get_product(product_id)
         if not product:
             await call.answer("❌ Товар не найден", show_alert=True)
+            return
+
+        if not product['price_stars']:
+            await pay_stars_equiv(call, state)
             return
 
         existing = get_pending_order(call.from_user.id, product_id)
@@ -278,14 +342,14 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         await state.update_data(order_id=order_id, product=product)
         await state.set_state(CatalogStates.waiting_for_screenshot)
 
-        text = (f"⭐️  <b>Оплата звездами</b>\n\n"
+        text = (f"⭐️ <b>Оплата звездами</b>\n\n"
                 f"📦 Товар: {product['name']}\n"
                 f"💰 Сумма: {amount} ⭐️\n\n"
-                f"📌  <b>Инструкция: </b>\n"
+                f"📌 <b>Инструкция:</b>\n"
                 f"1️⃣ Перейдите по ссылке: @{ADMIN_STARS_USERNAME}\n"
                 f"2️⃣ Переведите {amount} звезд на этот аккаунт\n"
                 f"3️⃣ После перевода нажмите «✅ Отправить скриншот»\n\n"
-                f"👨‍💻 Администратор проверит и подтвердит заказ ")
+                f"👨‍💻 Администратор проверит и подтвердит заказ")
 
         kb = InlineKeyboardBuilder()
         kb.row(InlineKeyboardButton(text="🚀 Перейти к переводу", url=f"https://t.me/{ADMIN_STARS_USERNAME}"))
@@ -296,14 +360,14 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
 
     @dp.callback_query(F.data == "send_screenshot_ready")
     async def screenshot_ready(call: CallbackQuery, state: FSMContext):
-        await send_func(call.from_user.id, "📸 Отправьте скриншот оплаты: ")
+        await send_func(call.from_user.id, "📸 Отправьте скриншот оплаты:")
         await state.set_state(CatalogStates.waiting_for_screenshot)
 
     @dp.message(CatalogStates.waiting_for_screenshot)
     async def receive_screenshot(message: Message, state: FSMContext):
         data = await state.get_data()
         if not data:
-            await send_func(message.chat.id, "❌ Заказ не найден. Начните заново. ")
+            await send_func(message.chat.id, "❌ Заказ не найден. Начните заново.")
             await state.clear()
             return
 
@@ -311,7 +375,7 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         product = data['product']
 
         if not message.photo:
-            await send_func(message.chat.id, "❌ Пожалуйста, отправьте скриншот оплаты (фото). ")
+            await send_func(message.chat.id, "❌ Пожалуйста, отправьте скриншот оплаты (фото).")
             return
 
         photo = message.photo[-1]
@@ -319,17 +383,17 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
 
         update_order_status(order_id, 'pending', screenshot_file_id=file_id)
 
-        caption = (f"🛍  <b>НОВЫЙ ЗАКАЗ НА ПРОВЕРКУ </b>\n\n"
-                   f"👤  <b>Пользователь: </b> {message.from_user.full_name}\n"
-                   f"🔖  <b>Username: </b> @{message.from_user.username or '—'}\n"
-                   f"🆔  <b>ID: </b> <code>{message.from_user.id}</code>\n"
+        caption = (f"🛍 <b>НОВЫЙ ЗАКАЗ НА ПРОВЕРКУ</b>\n\n"
+                   f"👤 <b>Пользователь:</b> {message.from_user.full_name}\n"
+                   f"🔖 <b>Username:</b> @{message.from_user.username or '—'}\n"
+                   f"🆔 <b>ID:</b> <code>{message.from_user.id}</code>\n"
                    f"━━━━━━━━━━━━━━━━━━━━━\n"
-                   f"📦  <b>Товар: </b> {product['name']}\n"
-                   f"💳  <b>Способ: </b> ⭐️ Звезды\n"
-                   f"💰  <b>Сумма: </b> {product['price_stars']} ⭐️\n"
-                   f"🔢  <b>Заказ №{order_id}</b>\n"
+                   f"📦 <b>Товар:</b> {product['name']}\n"
+                   f"💳 <b>Способ:</b> ⭐️ Звезды\n"
+                   f"💰 <b>Сумма:</b> {product['price_stars'] or int(product['price_crypto'] * USDT_TO_STARS_RATE)} ⭐️\n"
+                   f"🔢 <b>Заказ №{order_id}</b>\n"
                    f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-                   f"✅  <b>Подтвердить заказ? </b> ")
+                   f"✅ <b>Подтвердить заказ?</b>")
 
         kb = InlineKeyboardBuilder()
         kb.row(
@@ -343,7 +407,7 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
             except Exception as e:
                 logging.error(f"Не удалось отправить админу {admin_id}: {e}")
 
-        await send_func(message.chat.id, "✅  <b>Скриншот отправлен на проверку! </b>\n\nОжидайте подтверждения заказа. ", parse_mode="HTML")
+        await send_func(message.chat.id, "✅ <b>Скриншот отправлен на проверку!</b>\n\nОжидайте подтверждения заказа.", parse_mode="HTML")
         await state.clear()
 
     @dp.callback_query(F.data.startswith("verify_order_"))
@@ -355,9 +419,9 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         if row:
             user_id, product_id = row
             product = get_product(product_id)
-            await send_func(user_id, f"✅  <b>ЗАКАЗ ПОДТВЕРЖДЕН! </b>\n\n📦 Товар: {product['name']}\n🔢 Заказ №{order_id}\n\nСпасибо за покупку! 🎉 ", parse_mode="HTML")
-        await edit_func(call.message, f"✅ Заказ №{order_id} подтвержден. ", reply_markup=None)
-        await call.answer("✅ Заказ подтвержден! ")
+            await send_func(user_id, f"✅ <b>ЗАКАЗ ПОДТВЕРЖДЕН!</b>\n\n📦 Товар: {product['name']}\n🔢 Заказ №{order_id}\n\nСпасибо за покупку! 🎉", parse_mode="HTML")
+        await edit_func(call.message, f"✅ Заказ №{order_id} подтвержден.", reply_markup=None)
+        await call.answer("✅ Заказ подтвержден!")
 
     @dp.callback_query(F.data.startswith("reject_order_"))
     async def reject_order(call: CallbackQuery, state: FSMContext):
@@ -367,9 +431,9 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
             row = conn.execute("SELECT user_id, product_id FROM orders WHERE id=?", (order_id,)).fetchone()
         if row:
             user_id, product_id = row
-            await send_func(user_id, f"❌  <b>ЗАКАЗ ОТКЛОНЕН </b>\n\nЗаказ №{order_id} был отклонен администратором.\n\nПожалуйста, свяжитесь с поддержкой для уточнения деталей. ", parse_mode="HTML")
-        await edit_func(call.message, f"❌ Заказ №{order_id} отклонен. ", reply_markup=None)
-        await call.answer("❌ Заказ отклонен ")
+            await send_func(user_id, f"❌ <b>ЗАКАЗ ОТКЛОНЕН</b>\n\nЗаказ №{order_id} был отклонен администратором.\n\nПожалуйста, свяжитесь с поддержкой для уточнения деталей.", parse_mode="HTML")
+        await edit_func(call.message, f"❌ Заказ №{order_id} отклонен.", reply_markup=None)
+        await call.answer("❌ Заказ отклонен")
 
     # --- Оплата через Cryptobot ---
     @dp.callback_query(F.data.startswith("pay_crypto_"))
@@ -383,18 +447,19 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         try:
             invoice = create_crypto_invoice(product['price_crypto'])
         except Exception as e:
-            await edit_func(call.message, f"❌ Ошибка при создании счета: {e}\nПопробуйте позже. ")
+            await edit_func(call.message, f"❌ Ошибка при создании счета: {e}\nПопробуйте позже.")
             return
 
         amount = str(product['price_crypto'])
         order_id = create_order(call.from_user.id, product_id, 'crypto', amount, crypto_invoice_id=invoice['invoice_id'])
-        stars_equivalent = product['price_stars']
 
-        text = (f"💎  <b>ОПЛАТА {CRYPTOBOT_ASSET} (CRYPTOBOT) </b>\n\n"
+        stars_equivalent = int(product['price_crypto'] * USDT_TO_STARS_RATE)
+
+        text = (f"💎 <b>ОПЛАТА {CRYPTOBOT_ASSET} (CRYPTOBOT)</b>\n\n"
                 f"📦 Товар: {product['name']}\n"
                 f"💰 Сумма: {product['price_crypto']} {CRYPTOBOT_ASSET}\n"
                 f"⭐️ Эквивалент звездами: {stars_equivalent} ⭐️\n\n"
-                f"✅ После оплаты нажмите кнопку «Проверить оплату» ")
+                f"✅ После оплаты нажмите кнопку «Проверить оплату»")
 
         kb = InlineKeyboardBuilder()
         kb.row(InlineKeyboardButton(text=f"💎 Оплатить {CRYPTOBOT_ASSET}", url=invoice['pay_url']))
@@ -417,16 +482,16 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         if invoice and invoice['status'] == 'paid':
             update_order_status(order_id, 'completed', completed_at=datetime.now().isoformat())
             product = get_product(product_id)
-            await edit_func(call.message, f"✅ Оплата получена! Заказ №{order_id} выполнен. ", reply_markup=None)
-            await send_func(user_id, f"✅  <b>ЗАКАЗ ПОДТВЕРЖДЕН! </b>\n\n📦 Товар: {product['name']}\n💎 Оплачено: {product['price_crypto']} {CRYPTOBOT_ASSET}\n\nСпасибо за покупку! 🎉 ", parse_mode="HTML")
+            await edit_func(call.message, f"✅ Оплата получена! Заказ №{order_id} выполнен.", reply_markup=None)
+            await send_func(user_id, f"✅ <b>ЗАКАЗ ПОДТВЕРЖДЕН!</b>\n\n📦 Товар: {product['name']}\n💎 Оплачено: {product['price_crypto']} {CRYPTOBOT_ASSET}\n\nСпасибо за покупку! 🎉", parse_mode="HTML")
         else:
-            await call.answer("⏳ Оплата еще не получена. Попробуйте позже. ", show_alert=True)
+            await call.answer("⏳ Оплата еще не получена. Попробуйте позже.", show_alert=True)
 
     @dp.callback_query(F.data == "cancel_order")
     async def cancel_order(call: CallbackQuery, state: FSMContext):
         await state.clear()
-        await edit_func(call.message, "❌ Заказ отменен. ", reply_markup=None)
-        await call.answer("Заказ отменен ")
+        await edit_func(call.message, "❌ Заказ отменен.", reply_markup=None)
+        await call.answer("Заказ отменен")
 
     # ══════════════════════════════════════════════
     # 👑 АДМИНИСТРИРОВАНИЕ КАТАЛОГА
@@ -435,75 +500,166 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
     @dp.callback_query(F.data == "admin_manage_catalog")
     async def admin_manage_catalog(call: CallbackQuery, state: FSMContext):
         if call.from_user.id not in admin_ids:
-            return await call.answer("🚫 Нет доступа ", show_alert=True)
+            return await call.answer("🚫 Нет доступа", show_alert=True)
         kb = InlineKeyboardBuilder()
         kb.row(InlineKeyboardButton(text="➕ Добавить товар", callback_data="admin_add_product"))
         kb.row(InlineKeyboardButton(text="📋 Список товаров", callback_data="admin_list_products"))
-        # Кнопка загрузки из TXT удалена
+        kb.row(InlineKeyboardButton(text="📤 Загрузить из TXT", callback_data="admin_upload_txt"))
         kb.row(InlineKeyboardButton(text="🗑 Очистить каталог", callback_data="admin_clear_catalog"))
         kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel"))
-        await edit_func(call.message, "📦  <b>Управление каталогом </b> ", reply_markup=kb.as_markup(), parse_mode="HTML")
+        await edit_func(call.message, "📦 <b>Управление каталогом</b>", reply_markup=kb.as_markup(), parse_mode="HTML")
+
+    @dp.callback_query(F.data == "admin_upload_txt")
+    async def upload_txt_start(call: CallbackQuery, state: FSMContext):
+        if call.from_user.id not in admin_ids:
+            return await call.answer("🚫 Нет доступа", show_alert=True)
+        await state.set_state(CatalogStates.waiting_for_txt_upload)
+        await edit_func(call.message,
+                        "📤 <b>Загрузка товаров из TXT</b>\n\n"
+                        "<b>Формат файла:</b>\n"
+                        "<code>Название товара\n"
+                        "Цена_звездами\n"
+                        "Цена_USDT\n"
+                        "Описание товара\n"
+                        "---\n"
+                        "Название 2\n"
+                        "100\n"
+                        "50\n"
+                        "Описание 2</code>\n\n"
+                        "📌 Цена 0 = не используется\n"
+                        "📌 Разделитель товаров: <code>---</code>\n\n"
+                        "<b>Отправьте TXT файл:</b>",
+                        parse_mode="HTML")
+        await call.answer()
+
+    @dp.message(CatalogStates.waiting_for_txt_upload)
+    async def process_txt_file(message: Message, state: FSMContext):
+        if message.from_user.id not in admin_ids:
+            return
+
+        if not message.document:
+            await send_func(message.chat.id, "❌ Отправьте файл в формате TXT.")
+            return
+
+        file = await bot.get_file(message.document.file_id)
+        file_content = await bot.download_file(file.file_path)
+        text = file_content.read().decode('utf-8')
+
+        items = []
+        if '---' in text:
+            items = [item.strip() for item in text.split('---') if item.strip()]
+        else:
+            lines = [line.strip() for line in text.split('\n') if line.strip()]
+            for i in range(0, len(lines), 4):
+                if i + 3 < len(lines):
+                    items.append('\n'.join(lines[i:i+4]))
+
+        success = 0
+        errors = []
+        for idx, item in enumerate(items, 1):
+            lines = item.split('\n')
+            if len(lines) < 4:
+                errors.append(f"Товар {idx}: недостаточно полей")
+                continue
+
+            name = lines[0].strip()
+            price_stars_str = lines[1].strip()
+            price_crypto_str = lines[2].strip()
+            description = '\n'.join(lines[3:]).strip()
+
+            try:
+                ps = int(price_stars_str) if price_stars_str.isdigit() and price_stars_str != '0' else None
+            except Exception:
+                ps = None
+            try:
+                pc = float(price_crypto_str) if price_crypto_str.replace('.', '', 1).isdigit() and price_crypto_str != '0' else None
+            except Exception:
+                pc = None
+
+            if ps is None and pc is None:
+                errors.append(f"Товар {idx}: обе цены равны 0")
+                continue
+
+            add_product(name, ps, pc, description)
+            success += 1
+
+        result_text = f"✅ <b>Загрузка завершена!</b>\n\n📦 Добавлено: {success}\n❌ Ошибок: {len(errors)}"
+        if errors:
+            result_text += f"\n\n⚠️ <b>Ошибки:</b>\n" + "\n".join(errors[:10])
+
+        await send_func(message.chat.id, result_text, parse_mode="HTML")
+        await state.clear()
 
     @dp.callback_query(F.data == "admin_clear_catalog")
     async def clear_catalog(call: CallbackQuery, state: FSMContext):
         if call.from_user.id not in admin_ids:
-            return await call.answer("🚫 Нет доступа ", show_alert=True)
+            return await call.answer("🚫 Нет доступа", show_alert=True)
         clear_all_products()
-        await call.answer("✅ Весь каталог очищен! ", show_alert=True)
+        await call.answer("✅ Весь каталог очищен!", show_alert=True)
         await admin_manage_catalog(call, state)
 
     @dp.callback_query(F.data == "admin_add_product")
     async def add_product_start(call: CallbackQuery, state: FSMContext):
         if call.from_user.id not in admin_ids:
-            return await call.answer("🚫 Нет доступа ", show_alert=True)
+            return await call.answer("🚫 Нет доступа", show_alert=True)
         await state.set_state(CatalogStates.waiting_for_product_name)
-        await edit_func(call.message, "📝 Введите <b>название товара </b>: ", parse_mode="HTML")
+        await edit_func(call.message, "📝 Введите <b>название товара</b>:", parse_mode="HTML")
         await call.answer()
 
     @dp.message(CatalogStates.waiting_for_product_name)
     async def get_product_name(message: Message, state: FSMContext):
         await state.update_data(name=message.text)
+        await state.set_state(CatalogStates.waiting_for_product_price_stars)
+        await send_func(message.chat.id, "⭐️ Введите <b>цену в звездах</b> (0 = не используется):", parse_mode="HTML")
+
+    @dp.message(CatalogStates.waiting_for_product_price_stars)
+    async def get_price_stars(message: Message, state: FSMContext):
+        if not message.text.isdigit():
+            await send_func(message.chat.id, "❌ Введите целое число:")
+            return
+        await state.update_data(price_stars=int(message.text))
         await state.set_state(CatalogStates.waiting_for_product_price_crypto)
-        await send_func(message.chat.id, f"💰 Введите <b>цену в {CRYPTOBOT_ASSET} </b>: ", parse_mode="HTML")
+        await send_func(message.chat.id, f"💰 Введите <b>цену в {CRYPTOBOT_ASSET}</b> (0 = не используется):", parse_mode="HTML")
 
     @dp.message(CatalogStates.waiting_for_product_price_crypto)
     async def get_price_crypto(message: Message, state: FSMContext):
         try:
             price = float(message.text)
         except ValueError:
-            await send_func(message.chat.id, "❌ Введите число (можно дробное): ")
+            await send_func(message.chat.id, "❌ Введите число (можно дробное):")
             return
         await state.update_data(price_crypto=price)
         await state.set_state(CatalogStates.waiting_for_product_description)
-        await send_func(message.chat.id, "📝 Введите <b>описание товара </b>: ", parse_mode="HTML")
+        await send_func(message.chat.id, "📝 Введите <b>описание товара</b>:", parse_mode="HTML")
 
     @dp.message(CatalogStates.waiting_for_product_description)
     async def get_description(message: Message, state: FSMContext):
         data = await state.get_data()
         product_id = add_product(
             name=data['name'],
-            price_crypto=data['price_crypto'],
+            price_stars=data['price_stars'] if data['price_stars'] != 0 else None,
+            price_crypto=data['price_crypto'] if data['price_crypto'] != 0.0 else None,
             description=message.text
         )
         await state.clear()
-        stars_price = int(data['price_crypto'] * USDT_TO_STARS_RATE)
-        await send_func(message.chat.id, f"✅ <b>Товар добавлен! </b>\n\n📦 {data['name']}\n💰 {data['price_crypto']} {CRYPTOBOT_ASSET}\n⭐️ {stars_price} Stars\n🆔 ID: {product_id} ", parse_mode="HTML")
+        await send_func(message.chat.id, f"✅ <b>Товар добавлен!</b>\n\n📦 {data['name']}\n🆔 ID: {product_id}", parse_mode="HTML")
         kb = InlineKeyboardBuilder()
         kb.row(InlineKeyboardButton(text="📦 Каталог", callback_data="catalog"))
         kb.row(InlineKeyboardButton(text="⚙️ Админ панель", callback_data="admin_panel"))
-        await send_func(message.chat.id, "Что дальше? ", reply_markup=kb.as_markup())
+        await send_func(message.chat.id, "Что дальше?", reply_markup=kb.as_markup())
 
     @dp.callback_query(F.data == "admin_list_products")
     async def list_products(call: CallbackQuery, state: FSMContext):
         if call.from_user.id not in admin_ids:
-            return await call.answer("🚫 Нет доступа ", show_alert=True)
+            return await call.answer("🚫 Нет доступа", show_alert=True)
         products, _ = get_products(offset=0, limit=1000, shuffle=False)
         if not products:
-            await edit_func(call.message, "📭  <b>Каталог пуст </b> ", parse_mode="HTML")
+            await edit_func(call.message, "📭 <b>Каталог пуст</b>", parse_mode="HTML")
             return
-        text = "📋  <b>Список товаров </b>\n\n"
+        text = "📋 <b>Список товаров</b>\n\n"
         for p in products:
-            text += f"🆔 <b>{p['id']}</b> • {p['name']}\n   ⭐️ {p['price_stars']} | 💰 {p['price_crypto']} {CRYPTOBOT_ASSET}\n\n"
+            stars_price = p['price_stars'] if p['price_stars'] else int(p['price_crypto'] * USDT_TO_STARS_RATE) if p['price_crypto'] else 0
+            text += f"🆔 <b>{p['id']}</b> • {p['name']}\n   ⭐️ {stars_price} | 💰 {p['price_crypto'] or '—'} {CRYPTOBOT_ASSET}\n\n"
         kb = InlineKeyboardBuilder()
         for p in products:
             kb.row(InlineKeyboardButton(text=f"❌ Удалить {p['name']}", callback_data=f"admin_del_product_{p['id']}"))
@@ -513,8 +669,9 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
     @dp.callback_query(F.data.startswith("admin_del_product_"))
     async def delete_product_handler(call: CallbackQuery, state: FSMContext):
         if call.from_user.id not in admin_ids:
-            return await call.answer("🚫 Нет доступа ", show_alert=True)
+            return await call.answer("🚫 Нет доступа", show_alert=True)
         product_id = int(call.data.split("_")[3])
         delete_product_by_id(product_id)
-        await call.answer("✅ Товар удален! ")
+        await call.answer("✅ Товар удален!")
         await admin_manage_catalog(call, state)
+</DOCUMENT>
