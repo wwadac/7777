@@ -353,7 +353,7 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
                 f"📦 Товар: {product['name']}\n"
                 f"💰 Сумма: {amount} ⭐️\n\n"
                 f"📌 <b>Инструкция:</b>\n"
-                f"1️⃣ Перейдите по ссылке: <code>https://t.me/{@Id19911}</code>\n"
+                f"1️⃣ Перейдите по ссылке: <code>https://t.me/{Id19911}</code>\n"
                 f"2️⃣ Переведите {amount} звезд на этот аккаунт\n"
                 f"3️⃣ После перевода нажмите «✅ Отправить скриншот»\n\n"
                 f"👨‍💻 Администратор проверит и подтвердит заказ")
