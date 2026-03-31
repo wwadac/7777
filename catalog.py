@@ -302,7 +302,7 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         await state.update_data(order_id=order_id, product=product)
         await state.set_state(CatalogStates.waiting_for_screenshot)
 
-        admin_stars_username = "admin_stars_username"
+        admin_stars_username = "@Id19911"  # ← ЗАМЕНИТЕ НА ВАШ USERNAME
         text = (f"⭐️ <b>Оплата звездами</b>\n\n"
                 f"📦 Товар: {product['name']}\n"
                 f"💰 Сумма: {stars_price} ⭐️\n\n"
@@ -348,18 +348,18 @@ def register_catalog_handlers(dp: Dispatcher, bot: Bot, admin_ids: List[int], se
         await state.update_data(order_id=order_id, product=product)
         await state.set_state(CatalogStates.waiting_for_screenshot)
 
-        admin_stars_username = "admin_stars_username"
+        admin_stars_username = "admin_stars_username"  # ← ЗАМЕНИТЕ НА ВАШ USERNAME
         text = (f"⭐️ <b>Оплата звездами</b>\n\n"
                 f"📦 Товар: {product['name']}\n"
                 f"💰 Сумма: {amount} ⭐️\n\n"
                 f"📌 <b>Инструкция:</b>\n"
-                f"1️⃣ Перейдите по ссылке: <code>https://t.me/{Id19911}</code>\n"
+                f"1️⃣ Перейдите по ссылке: <code>https://t.me/{admin_stars_username}</code>\n"
                 f"2️⃣ Переведите {amount} звезд на этот аккаунт\n"
                 f"3️⃣ После перевода нажмите «✅ Отправить скриншот»\n\n"
                 f"👨‍💻 Администратор проверит и подтвердит заказ")
         
         kb = InlineKeyboardBuilder()
-        kb.row(InlineKeyboardButton(text="🚀 Перейти к переводу", url=f"https://t.me/{Id19911}"))
+        kb.row(InlineKeyboardButton(text="🚀 Перейти к переводу", url=f"https://t.me/{admin_stars_username}"))
         kb.row(InlineKeyboardButton(text="✅ Отправить скриншот", callback_data="send_screenshot_ready"))
         kb.row(InlineKeyboardButton(text="❌ Отменить заказ", callback_data="cancel_order"))
         await edit_func(call.message, text, reply_markup=kb.as_markup(), parse_mode="HTML")
